@@ -1,0 +1,38 @@
+[package]
+name = "citri"
+version = "0.3.0"
+description = "A lightweight cross-application selection assistant"
+authors = ["CitrI Contributors"]
+edition = "2024"
+rust-version = "1.88"
+
+[lib]
+name = "citri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.3", features = [] }
+
+[dependencies]
+active-win-pos-rs = "0.11.0"
+atomic-write-file = "0.3.0"
+futures-util = "0.3.31"
+open = "5.3.3"
+rdev = "0.5.3"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tauri = { version = "2.11.1", features = ["tray-icon", "image-png"] }
+tauri-runtime = "2.11.3"
+tauri-plugin-clipboard-manager = "2.3.2"
+tauri-plugin-single-instance = "2.4.0"
+tokio = { version = "1.48.0", features = ["macros", "rt"] }
+tokio-util = "0.7.16"
+ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
+urlencoding = "2.1.3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-clipboard = "0.9.3"
+
+[dev-dependencies]
+tempfile = "3.23.0"

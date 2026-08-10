@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop",
+  "description": "Local CitrI desktop windows",
+  "windows": ["settings", "toolbar", "action-*"],
+  "permissions": ["core:default"]
+}
+

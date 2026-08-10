@@ -1,0 +1,19 @@
+* text=auto
+.gitattributes text eol=lf
+.gitignore text eol=lf
+
+# Keep source files consistent across Windows, macOS, and Linux.
+*.css text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.ts text eol=lf
+*.vue text eol=lf
+
+# Application assets.
+*.icns binary
+*.ico binary
+*.png binary

@@ -1,0 +1,20 @@
+export type { AccentColor } from '@/generated/AccentColor'
+export type { ActionItem } from '@/generated/ActionItem'
+export type { ActionSession } from '@/generated/ActionSession'
+export type { ApiProfile } from '@/generated/ApiProfile'
+export type { FilterMode } from '@/generated/FilterMode'
+export type { PlatformInfo } from '@/generated/PlatformInfo'
+export type { PublicAction } from '@/generated/PublicAction'
+export type { PublicSettings } from '@/generated/PublicSettings'
+export type { SelectionPayload } from '@/generated/SelectionPayload'
+export type { Settings } from '@/generated/Settings'
+export type { ToolbarState } from '@/generated/ToolbarState'
+export type { JsonValue } from '@/generated/serde_json/JsonValue'
+
+export type ExtraParameterType = 'string' | 'boolean' | 'number' | 'json'
+
+export interface ExtraParameter {
+  key: string
+  type: ExtraParameterType
+  value: string
+}

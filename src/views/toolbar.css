@@ -1,0 +1,12 @@
+html, body, #app { width: max-content; min-width: 0; min-height: 0; overflow: hidden; background: transparent !important; }
+.toolbar-stack { width: max-content; max-width: 994px; }
+.selection-toolbar { margin: 2px 3px 5px; height: 36px; display: inline-flex; align-items: stretch; overflow: hidden; border-radius: 10px; user-select: none; background: var(--card); box-shadow: 0 2px 4px rgba(50, 50, 50, .18); white-space: nowrap; }
+.toolbar-brand { display: flex; align-items: center; justify-content: center; padding: 0 6px 0 8px; border: .5px solid rgba(0, 0, 0, .1); border-right: 0; border-radius: 10px 0 0 10px; }
+.toolbar-brand img { width: 22px; height: 22px; object-fit: cover; border-radius: 50%; pointer-events: none; }
+.toolbar-actions { display: flex; border: .5px solid rgba(0, 0, 0, .1); border-left: 0; border-radius: 0 10px 10px 0; }
+.toolbar-actions button { height: 35px; display: flex; align-items: center; justify-content: center; gap: 3px; padding: 0 8px; border: 0; border-radius: 0; color: var(--foreground); background: transparent; transition: background-color .1s, color .1s; }
+.toolbar-actions button:last-child { padding-right: 11px; border-radius: 0 10px 10px 0; }.toolbar-actions button:hover { color: var(--primary); background: var(--accent); }.toolbar-actions button span { max-width: 120px; overflow: hidden; text-overflow: ellipsis; font-size: calc(13px * var(--font-scale)); line-height: 1.1; }.toolbar-actions button.success { color: var(--success); }
+.toolbar-actions button:disabled { cursor: wait; opacity: .62; }.toolbar-actions button.busy { color: var(--primary); background: var(--accent); }
+.toolbar-error { margin: -1px 3px 5px; max-width: 480px; padding: 5px 8px; overflow: hidden; border: .5px solid color-mix(in srgb, var(--destructive) 38%, transparent); border-radius: 7px; color: var(--destructive); background: var(--card); box-shadow: 0 2px 4px rgba(50, 50, 50, .14); font-size: calc(12px * var(--font-scale)); line-height: 1.25; white-space: normal; }
+.selection-toolbar.compact .toolbar-actions button { width: 34px; padding: 0; }.selection-toolbar.compact .toolbar-actions button:last-child { width: 38px; padding-right: 4px; }
+@media (prefers-color-scheme: dark) { .toolbar-brand, .toolbar-actions { border-color: rgba(255, 255, 255, .18); } }

@@ -1,0 +1,461 @@
+use crate::{
+    AppState,
+    constants::{TOOLBAR_DEFAULT_HEIGHT, TOOLBAR_DEFAULT_WIDTH},
+    models::{FilterMode, SelectionPayload},
+};
+use rdev::{Button, Event, EventType, Key, listen};
+use std::{
+    path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+use tauri::{Emitter, Manager, PhysicalPosition};
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use tauri_plugin_clipboard_manager::ClipboardExt;
+
+const DEFAULT_WINDOWS_BLACKLIST: &[&str] = &[
+    "explorer.exe",
+    "snipaste.exe",
+    "pixpin.exe",
+    "sharex.exe",
+    "excel.exe",
+    "powerpnt.exe",
+    "photoshop.exe",
+    "illustrator.exe",
+    "adobe premiere pro.exe",
+    "afterfx.exe",
+    "adobe audition.exe",
+    "blender.exe",
+    "3dsmax.exe",
+    "maya.exe",
+    "acad.exe",
+    "sldworks.exe",
+    "mstsc.exe",
+];
+const DEFAULT_MACOS_BLACKLIST: &[&str] = &["com.apple.finder", "finder"];
+
+#[derive(Default)]
+struct Gesture {
+    cursor: (f64, f64),
+    pressed: Option<(f64, f64, Instant)>,
+    last_release: Option<(f64, f64, Instant)>,
+}
+
+pub struct SelectionController {
+    enabled: Arc<AtomicBool>,
+    started: AtomicBool,
+    generation: Arc<AtomicU64>,
+}
+
+impl SelectionController {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled: Arc::new(AtomicBool::new(enabled)),
+            started: AtomicBool::new(false),
+            generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+        if !enabled {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn start(&self, app: tauri::AppHandle) {
+        if self.started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let enabled = self.enabled.clone();
+        let generation = self.generation.clone();
+        thread::spawn(move || {
+            let gesture = Arc::new(Mutex::new(Gesture::default()));
+            let callback_app = app.clone();
+            let callback_gesture = gesture.clone();
+            let callback_enabled = enabled.clone();
+            let callback_generation = generation.clone();
+            let result = listen(move |event| {
+                handle_event(
+                    &callback_app,
+                    &callback_gesture,
+                    &callback_enabled,
+                    &callback_generation,
+                    event,
+                )
+            });
+            if let Err(error) = result {
+                let message = format!("划词监听器启动失败：{error:?}");
+                eprintln!("[selection] {message}");
+                let event_app = app.clone();
+                let dispatcher = app.clone();
+                let _ = dispatcher.run_on_main_thread(move || {
+                    let _ = event_app.emit_to("settings", "selection-error", message);
+                });
+            }
+        });
+    }
+}
+
+fn handle_event(
+    app: &tauri::AppHandle,
+    gesture: &Arc<Mutex<Gesture>>,
+    enabled: &Arc<AtomicBool>,
+    generation: &Arc<AtomicU64>,
+    event: Event,
+) {
+    match event.event_type {
+        EventType::MouseMove { x, y } => {
+            if let Ok(mut current) = gesture.lock() {
+                current.cursor = (x, y);
+            }
+        }
+        EventType::ButtonPress(Button::Left) => {
+            let (x, y) = gesture
+                .lock()
+                .map(|mut current| {
+                    current.pressed = Some((current.cursor.0, current.cursor.1, Instant::now()));
+                    current.cursor
+                })
+                .unwrap_or_default();
+            hide_toolbar_when_outside(app, x, y);
+        }
+        EventType::ButtonRelease(Button::Left) => {
+            if !enabled.load(Ordering::Acquire) {
+                return;
+            }
+            let candidate = gesture.lock().ok().and_then(|mut current| {
+                let (x, y) = current.cursor;
+                let now = Instant::now();
+                let pressed = current.pressed.take();
+                let is_double_click = current.last_release.is_some_and(|(last_x, last_y, last)| {
+                    now.duration_since(last) <= Duration::from_millis(450)
+                        && (x - last_x).hypot(y - last_y) <= 5.0
+                });
+                current.last_release = Some((x, y, now));
+                pressed.and_then(|(start_x, start_y, started)| {
+                    let distance = (x - start_x).hypot(y - start_y);
+                    let duration = now.duration_since(started);
+                    (is_double_click || (distance >= 4.0 && duration <= Duration::from_secs(10)))
+                        .then_some((start_x, start_y, x, y))
+                })
+            });
+            if let Some(points) = candidate {
+                let capture_id = generation.fetch_add(1, Ordering::AcqRel) + 1;
+                let app = app.clone();
+                let enabled = enabled.clone();
+                let generation = generation.clone();
+                thread::spawn(move || {
+                    capture_selection(app, enabled, generation, capture_id, points)
+                });
+            }
+        }
+        EventType::Wheel { .. } => hide_toolbar(app),
+        EventType::KeyPress(key) if !is_modifier(key) => hide_toolbar(app),
+        _ => {}
+    }
+}
+
+fn capture_selection(
+    app: tauri::AppHandle,
+    enabled: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    capture_id: u64,
+    points: (f64, f64, f64, f64),
+) {
+    thread::sleep(Duration::from_millis(75));
+    if !enabled.load(Ordering::Acquire) || generation.load(Ordering::Acquire) != capture_id {
+        return;
+    }
+    let active_window = active_win_pos_rs::get_active_window().ok();
+    let app_name = active_window.as_ref().map(|window| window.app_name.clone());
+    let process_name = active_window
+        .as_ref()
+        .and_then(|window| window.process_path.file_name())
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned);
+    let state = app.state::<AppState>();
+    let allowed = state.settings.read(|settings| {
+        application_allowed(
+            &settings.filter_mode,
+            &settings.filter_list,
+            app_name.as_deref(),
+            process_name.as_deref(),
+        )
+    });
+    if !allowed {
+        return;
+    }
+
+    let mut text = selected_text(&app);
+    if text.trim().is_empty() {
+        thread::sleep(Duration::from_millis(140));
+        if generation.load(Ordering::Acquire) != capture_id {
+            return;
+        }
+        text = selected_text(&app);
+    }
+    let text = text.trim().chars().take(200_000).collect::<String>();
+    if text.is_empty() || generation.load(Ordering::Acquire) != capture_id {
+        return;
+    }
+    let payload = SelectionPayload {
+        text,
+        x: points.2.round() as i32,
+        y: points.3.round() as i32,
+        app_name,
+    };
+    state.set_latest_selection(payload.clone());
+    let ui_app = app.clone();
+    let dispatcher = app.clone();
+    let _ = dispatcher.run_on_main_thread(move || {
+        position_toolbar(&ui_app, points);
+        let _ = ui_app.emit_to("toolbar", "selection-selected", payload);
+        if let Some(toolbar) = ui_app.get_webview_window("toolbar") {
+            let _ = toolbar.show();
+            let _ = toolbar.set_always_on_top(true);
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn selected_text(_app: &tauri::AppHandle) -> String {
+    let Ok(clipboard) = x11_clipboard::Clipboard::new() else {
+        return String::new();
+    };
+    clipboard
+        .load(
+            clipboard.getter.atoms.primary,
+            clipboard.getter.atoms.utf8_string,
+            clipboard.getter.atoms.property,
+            Duration::from_millis(500),
+        )
+        .ok()
+        .and_then(|contents| String::from_utf8(contents).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn selected_text(app: &tauri::AppHandle) -> String {
+    enum ClipboardBackup {
+        Text(String),
+        Image(tauri::image::Image<'static>),
+        Empty,
+    }
+
+    let clipboard = app.clipboard();
+    let backup = if let Ok(text) = clipboard.read_text() {
+        ClipboardBackup::Text(text)
+    } else if let Ok(image) = clipboard.read_image() {
+        ClipboardBackup::Image(image.to_owned())
+    } else {
+        ClipboardBackup::Empty
+    };
+    let _ = clipboard.clear();
+
+    #[cfg(target_os = "macos")]
+    let modifier = Key::MetaLeft;
+    #[cfg(target_os = "windows")]
+    let modifier = Key::ControlLeft;
+    let _ = rdev::simulate(&EventType::KeyPress(modifier));
+    let _ = rdev::simulate(&EventType::KeyPress(Key::KeyC));
+    let _ = rdev::simulate(&EventType::KeyRelease(Key::KeyC));
+    let _ = rdev::simulate(&EventType::KeyRelease(modifier));
+
+    let mut selected = String::new();
+    for _ in 0..12 {
+        thread::sleep(Duration::from_millis(20));
+        if let Ok(text) = clipboard.read_text() {
+            selected = text;
+            break;
+        }
+    }
+    match backup {
+        ClipboardBackup::Text(text) => {
+            let _ = clipboard.write_text(text);
+        }
+        ClipboardBackup::Image(image) => {
+            let _ = clipboard.write_image(&image);
+        }
+        ClipboardBackup::Empty => {
+            let _ = clipboard.clear();
+        }
+    }
+    selected
+}
+
+fn application_allowed(
+    mode: &FilterMode,
+    custom: &[String],
+    app_name: Option<&str>,
+    process_name: Option<&str>,
+) -> bool {
+    let candidates = [app_name, process_name]
+        .into_iter()
+        .flatten()
+        .map(|value| value.trim().to_lowercase())
+        .collect::<Vec<_>>();
+    if candidates
+        .iter()
+        .any(|candidate| candidate == "citri" || candidate == "citri.exe")
+    {
+        return false;
+    }
+    let matches = |entry: &str| {
+        let entry = entry.trim().to_lowercase();
+        candidates.iter().any(|candidate| {
+            candidate == &entry
+                || Path::new(candidate)
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    == Some(entry.as_str())
+        })
+    };
+    if *mode == FilterMode::Whitelist {
+        return custom.iter().any(|entry| matches(entry));
+    }
+    let predefined = if cfg!(target_os = "windows") {
+        DEFAULT_WINDOWS_BLACKLIST
+    } else if cfg!(target_os = "macos") {
+        DEFAULT_MACOS_BLACKLIST
+    } else {
+        &[]
+    };
+    !custom.iter().any(|entry| matches(entry))
+        && !(*mode == FilterMode::Default && predefined.iter().any(|entry| matches(entry)))
+}
+
+fn position_toolbar(app: &tauri::AppHandle, points: (f64, f64, f64, f64)) {
+    let Some(toolbar) = app.get_webview_window("toolbar") else {
+        return;
+    };
+    let size = toolbar.outer_size().unwrap_or_else(|_| {
+        tauri::PhysicalSize::new(TOOLBAR_DEFAULT_WIDTH, TOOLBAR_DEFAULT_HEIGHT)
+    });
+    let (start_x, start_y, end_x, end_y) = points;
+    let vertical = end_y - start_y;
+    let horizontal = end_x - start_x;
+    let mut x = if vertical.abs() > 14.0 {
+        if vertical > 0.0 {
+            end_x - size.width as f64
+        } else {
+            end_x
+        }
+    } else if horizontal > 0.0 {
+        end_x - size.width as f64
+    } else {
+        end_x
+    };
+    let mut y = if vertical < -14.0 {
+        end_y - size.height as f64 - 12.0
+    } else {
+        end_y + 16.0
+    };
+    if let Ok(monitors) = toolbar.available_monitors() {
+        let monitor = monitors
+            .iter()
+            .find(|monitor| {
+                let position = monitor.position();
+                let monitor_size = monitor.size();
+                end_x >= position.x as f64
+                    && end_x < (position.x + monitor_size.width as i32) as f64
+                    && end_y >= position.y as f64
+                    && end_y < (position.y + monitor_size.height as i32) as f64
+            })
+            .or_else(|| monitors.first());
+        if let Some(monitor) = monitor {
+            let position = monitor.position();
+            let monitor_size = monitor.size();
+            let min_x = position.x as f64;
+            let min_y = position.y as f64;
+            let max_x =
+                (position.x + monitor_size.width as i32 - size.width as i32).max(position.x) as f64;
+            let max_y = (position.y + monitor_size.height as i32 - size.height as i32)
+                .max(position.y) as f64;
+            x = x.clamp(min_x, max_x);
+            y = y.clamp(min_y, max_y);
+        }
+    }
+    let _ = toolbar.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+}
+
+fn hide_toolbar_when_outside(app: &tauri::AppHandle, x: f64, y: f64) {
+    let ui_app = app.clone();
+    let dispatcher = app.clone();
+    let _ = dispatcher.run_on_main_thread(move || {
+        let Some(toolbar) = ui_app.get_webview_window("toolbar") else {
+            return;
+        };
+        if !toolbar.is_visible().unwrap_or(false) {
+            return;
+        }
+        let inside = toolbar
+            .outer_position()
+            .ok()
+            .zip(toolbar.outer_size().ok())
+            .is_some_and(|(position, size)| {
+                x >= position.x as f64
+                    && x <= (position.x + size.width as i32) as f64
+                    && y >= position.y as f64
+                    && y <= (position.y + size.height as i32) as f64
+            });
+        if !inside {
+            let _ = toolbar.hide();
+        }
+    });
+}
+
+pub fn hide_toolbar(app: &tauri::AppHandle) {
+    let ui_app = app.clone();
+    let dispatcher = app.clone();
+    let _ = dispatcher.run_on_main_thread(move || {
+        if let Some(toolbar) = ui_app.get_webview_window("toolbar") {
+            let _ = toolbar.hide();
+        }
+    });
+}
+
+fn is_modifier(key: Key) -> bool {
+    matches!(
+        key,
+        Key::ShiftLeft
+            | Key::ShiftRight
+            | Key::ControlLeft
+            | Key::ControlRight
+            | Key::Alt
+            | Key::AltGr
+            | Key::MetaLeft
+            | Key::MetaRight
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_applications() {
+        assert!(!application_allowed(
+            &FilterMode::Blacklist,
+            &["code.exe".into()],
+            Some("Code"),
+            Some("code.exe")
+        ));
+        assert!(application_allowed(
+            &FilterMode::Whitelist,
+            &["code.exe".into()],
+            Some("Code"),
+            Some("code.exe")
+        ));
+        assert!(!application_allowed(
+            &FilterMode::Whitelist,
+            &["chrome.exe".into()],
+            Some("Code"),
+            Some("code.exe")
+        ));
+    }
+}
