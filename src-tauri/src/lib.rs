@@ -22,7 +22,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            let path = app.path().app_data_dir()?.join("settings.json");
+            let path = app.path().data_dir()?.join("citri").join("settings.json");
             let settings = SettingsStore::load(path);
             let should_show_settings = settings.active_profile().api_key.is_empty();
             app.manage(AppState::new(settings));

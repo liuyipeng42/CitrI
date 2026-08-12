@@ -60,7 +60,7 @@ function selectProfile(id: string): void {
     commit()
     settings.value.activeApiProfileId = id
     reload()
-    emit('status', '已切换，保存后生效')
+    emit('status', '已切换')
   } catch (error) { emit('status', errorMessage(error), 'error') }
 }
 
@@ -78,7 +78,7 @@ function addProfile(): void {
     settings.value.apiProfiles.push(profile)
     settings.value.activeApiProfileId = profile.id
     reload()
-    emit('status', '已添加 API 配置，请填写并保存')
+    emit('status', '已添加 API 配置')
   } catch (error) { emit('status', errorMessage(error), 'error') }
 }
 
@@ -89,7 +89,7 @@ function deleteProfile(): void {
   const next = settings.value.apiProfiles[Math.min(Math.max(index, 0), settings.value.apiProfiles.length - 1)]!
   settings.value.activeApiProfileId = next.id
   reload()
-  emit('status', '已删除，保存后生效')
+  emit('status', '已删除')
 }
 
 function changeParameterType(parameter: ExtraParameter): void {
@@ -121,13 +121,13 @@ defineExpose({ commit, reload })
         <div class="profile-heading"><label class="field"><span>配置名称</span><input v-model="activeProfile.name" maxlength="50" /></label><button class="danger-icon" type="button" title="删除当前 API" :disabled="settings.apiProfiles.length <= 1" @click="deleteProfile"><AppIcon name="trash" :size="15" /></button></div>
         <div class="field-grid">
           <label class="field field-wide"><span>API URL</span><input v-model.trim="activeProfile.apiUrl" type="url" placeholder="https://api.openai.com/v1" spellcheck="false" /><small>可填写基础地址，或完整的 <code>/chat/completions</code> 地址</small></label>
-          <label class="field field-wide"><span>API Key</span><div class="input-with-button"><input v-model.trim="activeProfile.apiKey" :type="showKey ? 'text' : 'password'" placeholder="sk-..." autocomplete="off" spellcheck="false" /><button type="button" :title="showKey ? '隐藏 API Key' : '显示 API Key'" @click="showKey = !showKey"><AppIcon :name="showKey ? 'eyeoff' : 'eye'" :size="16" /></button></div><small>仅由 Rust 后端读取并保存在本机，不会发送给工具条和结果窗口</small></label>
+          <label class="field field-wide"><span>API Key</span><div class="input-with-button"><input v-model.trim="activeProfile.apiKey" :type="showKey ? 'text' : 'password'" placeholder="sk-..." autocomplete="off" spellcheck="false" /><button type="button" :title="showKey ? '隐藏 API Key' : '显示 API Key'" data-no-autosave @click="showKey = !showKey"><AppIcon :name="showKey ? 'eyeoff' : 'eye'" :size="16" /></button></div><small>仅由 Rust 后端读取并保存在本机，不会发送给工具条和结果窗口</small></label>
           <label class="field"><span>模型</span><input v-model.trim="activeProfile.model" placeholder="gpt-4.1-mini" spellcheck="false" /></label>
           <label class="field"><span>温度 <b>{{ activeProfile.temperature.toFixed(1) }}</b></span><input v-model.number="activeProfile.temperature" type="range" min="0" max="2" step="0.1" /></label>
           <label class="field"><span>最大输出 Token</span><input v-model.number="activeProfile.maxTokens" type="number" min="1" max="128000" /></label>
-          <div class="field test-field"><span>连接测试</span><button class="secondary-button" type="button" :disabled="testing" @click="testApi">{{ testing ? '测试中…' : '测试当前 API' }}</button></div>
+          <div class="field test-field"><span>连接测试</span><button class="secondary-button" type="button" :disabled="testing" data-no-autosave @click="testApi">{{ testing ? '测试中…' : '测试当前 API' }}</button></div>
           <label class="field field-wide"><span>系统 Prompt</span><textarea v-model="activeProfile.systemPrompt" rows="3" /></label>
-          <div class="field field-wide"><div class="parameter-heading"><span>额外 API 请求参数</span><button class="secondary-button small-button" type="button" @click="extraParameters.push({ key: '', type: 'boolean', value: 'false' })"><AppIcon name="plus" :size="13" />添加参数</button></div>
+          <div class="field field-wide"><div class="parameter-heading"><span>额外 API 请求参数</span><button class="secondary-button small-button" type="button" data-no-autosave @click="extraParameters.push({ key: '', type: 'boolean', value: 'false' })"><AppIcon name="plus" :size="13" />添加参数</button></div>
             <div v-if="!extraParameters.length" class="parameter-empty">暂无额外参数</div>
             <div v-for="(parameter, index) in extraParameters" :key="index" class="parameter-row">
               <input v-model="parameter.key" placeholder="参数名称" spellcheck="false" />

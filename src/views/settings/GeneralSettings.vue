@@ -17,9 +17,9 @@ const enabledActions = computed(() => settings.value.actions.filter((action) => 
     <div class="preview-area">
       <div class="toolbar-preview" :class="{ compact: settings.compact }">
         <div class="preview-brand"><img :src="logoUrl" alt="" /></div>
-        <button v-for="action in enabledActions" :key="action.id" type="button" :title="action.name"><AppIcon :name="action.icon" :size="15" /><span v-if="!settings.compact">{{ action.name }}</span></button>
+        <button v-for="action in enabledActions" :key="action.id" type="button" :title="action.name" data-no-autosave><AppIcon :name="action.icon" :size="15" /><span v-if="!settings.compact">{{ action.name }}</span></button>
       </div>
     </div>
-    <p class="card-tip">保存后，在任意应用中拖动选中文本或双击单词即可唤出工具条。</p>
+    <p class="card-tip">启用后，在任意应用中拖动选中文本或双击单词即可唤出工具条。</p>
   </section>
 </template>

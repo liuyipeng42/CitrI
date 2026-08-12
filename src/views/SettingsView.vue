@@ -33,6 +33,9 @@ const filterListText = ref('')
 const apiSettings = ref<InstanceType<typeof ApiSettings> | null>(null)
 let statusTimer: number | undefined
 let unlistenSelectionError: UnlistenFn | undefined
+let editRevision = 0
+let saveRequested = false
+const editedFields = new WeakSet<Element>()
 
 const currentPage = computed(() => pages.find((item) => item.id === page.value) ?? pages[0]!)
 
@@ -43,22 +46,72 @@ function setStatus(message: string, kind: 'normal' | 'success' | 'error' = 'norm
   if (kind === 'success') statusTimer = window.setTimeout(() => (status.value = ''), 2600)
 }
 
-async function save(): Promise<void> {
-  if (!settings.value) return
+function requestSave(): void {
+  editRevision += 1
+  saveRequested = true
+  void flushSaves()
+}
+
+function isTextField(target: EventTarget | null): target is HTMLInputElement | HTMLTextAreaElement {
+  return target instanceof HTMLTextAreaElement
+    || (target instanceof HTMLInputElement && !['checkbox', 'range', 'color'].includes(target.type))
+}
+
+function noteDraftEdit(event: Event): void {
+  // Text fields save on change/blur, but typing must still invalidate an older
+  // in-flight response so it cannot overwrite the unsaved draft.
+  editRevision += 1
+  if (isTextField(event.target)) editedFields.add(event.target)
+}
+
+function handleControlChange(event: Event): void {
+  if (!isTextField(event.target)) requestSave()
+}
+
+function handleControlFocusOut(event: FocusEvent): void {
+  if (!isTextField(event.target) || !editedFields.has(event.target)) return
+  editedFields.delete(event.target)
+  requestSave()
+}
+
+function handleControlClick(event: MouseEvent): void {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button')
+  if (button && !button.dataset.noAutosave) requestSave()
+}
+
+async function flushSaves(): Promise<void> {
+  if (saving.value || !settings.value) return
   saving.value = true
-  setStatus('正在保存…')
   try {
-    apiSettings.value?.commit()
-    settings.value.filterList = filterListText.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)
-    const payload = JSON.parse(JSON.stringify(toRaw(settings.value))) as Settings
-    settings.value = await command<Settings>('save_settings', { settings: payload })
-    filterListText.value = settings.value.filterList.join('\n')
-    await nextTick()
-    apiSettings.value?.reload()
-    applyAppearance(settings.value)
-    setStatus('已保存', 'success')
-  } catch (error) { setStatus(errorMessage(error), 'error') }
-  finally { saving.value = false }
+    while (saveRequested && settings.value) {
+      saveRequested = false
+      const revision = editRevision
+      setStatus('正在自动保存…')
+      try {
+        apiSettings.value?.commit()
+        settings.value.filterList = filterListText.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)
+        const payload = JSON.parse(JSON.stringify(toRaw(settings.value))) as Settings
+        const saved = await command<Settings>('save_settings', { settings: payload })
+
+        // A newer edit may arrive while Rust is writing the previous snapshot.
+        // Never replace that newer local state with an older response.
+        if (editRevision === revision) {
+          settings.value = saved
+          filterListText.value = saved.filterList.join('\n')
+          await nextTick()
+          apiSettings.value?.reload()
+          applyAppearance(saved)
+          setStatus('已自动保存', 'success')
+        }
+      } catch (error) {
+        setStatus(errorMessage(error), 'error')
+        if (!saveRequested) break
+      }
+    }
+  } finally {
+    saving.value = false
+    if (saveRequested) void flushSaves()
+  }
 }
 
 onMounted(async () => {
@@ -95,10 +148,10 @@ onBeforeUnmount(() => {
     <section class="settings-content">
       <header class="page-header">
         <div><h1>{{ currentPage.title }}</h1><p>{{ currentPage.description }}</p></div>
-        <div class="header-actions"><span class="save-status" :class="statusKind">{{ status }}</span><button class="primary-button" :disabled="saving || !settings" @click="save">{{ saving ? '保存中…' : '保存设置' }}</button></div>
+        <div class="header-actions"><span class="save-status" :class="statusKind">{{ status }}</span></div>
       </header>
 
-      <main v-if="settings" class="settings-column">
+      <main v-if="settings" class="settings-column" @input="noteDraftEdit" @change="handleControlChange" @focusout="handleControlFocusOut" @click="handleControlClick">
         <div v-if="serviceError" class="notice error-notice">{{ serviceError }}</div>
         <div v-if="platformNotice" class="notice warning-notice">{{ platformNotice }}</div>
 

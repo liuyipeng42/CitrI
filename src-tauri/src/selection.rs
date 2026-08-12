@@ -5,6 +5,7 @@ use crate::{
 };
 use rdev::{Button, Event, EventType, Key, listen};
 use std::{
+    collections::HashSet,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -37,6 +38,7 @@ const DEFAULT_WINDOWS_BLACKLIST: &[&str] = &[
     "mstsc.exe",
 ];
 const DEFAULT_MACOS_BLACKLIST: &[&str] = &["com.apple.finder", "finder"];
+const SELECTION_SETTLE_DELAY: Duration = Duration::from_millis(160);
 
 #[derive(Default)]
 struct Gesture {
@@ -45,10 +47,68 @@ struct Gesture {
     last_release: Option<(f64, f64, Instant)>,
 }
 
+#[derive(Default)]
+struct InputActivity {
+    epoch: AtomicU64,
+    pressed_keys: Mutex<HashSet<Key>>,
+}
+
+impl InputActivity {
+    fn snapshot(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    fn note_key_press(&self, key: Key) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.pressed_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key);
+    }
+
+    fn note_key_release(&self, key: Key) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.pressed_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+    }
+
+    fn note_pointer_activity(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn is_idle_since(&self, expected_epoch: u64) -> bool {
+        self.epoch.load(Ordering::Acquire) == expected_epoch
+            && self
+                .pressed_keys
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+    }
+}
+
+struct CaptureGuard {
+    enabled: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    input: Arc<InputActivity>,
+    capture_id: u64,
+    expected_input_epoch: u64,
+}
+
+impl CaptureGuard {
+    fn is_current(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+            && self.generation.load(Ordering::Acquire) == self.capture_id
+            && self.input.is_idle_since(self.expected_input_epoch)
+    }
+}
+
 pub struct SelectionController {
     enabled: Arc<AtomicBool>,
     started: AtomicBool,
     generation: Arc<AtomicU64>,
+    input: Arc<InputActivity>,
 }
 
 impl SelectionController {
@@ -57,6 +117,7 @@ impl SelectionController {
             enabled: Arc::new(AtomicBool::new(enabled)),
             started: AtomicBool::new(false),
             generation: Arc::new(AtomicU64::new(0)),
+            input: Arc::new(InputActivity::default()),
         }
     }
 
@@ -73,18 +134,21 @@ impl SelectionController {
         }
         let enabled = self.enabled.clone();
         let generation = self.generation.clone();
+        let input = self.input.clone();
         thread::spawn(move || {
             let gesture = Arc::new(Mutex::new(Gesture::default()));
             let callback_app = app.clone();
             let callback_gesture = gesture.clone();
             let callback_enabled = enabled.clone();
             let callback_generation = generation.clone();
+            let callback_input = input.clone();
             let result = listen(move |event| {
                 handle_event(
                     &callback_app,
                     &callback_gesture,
                     &callback_enabled,
                     &callback_generation,
+                    &callback_input,
                     event,
                 )
             });
@@ -106,6 +170,7 @@ fn handle_event(
     gesture: &Arc<Mutex<Gesture>>,
     enabled: &Arc<AtomicBool>,
     generation: &Arc<AtomicU64>,
+    input: &Arc<InputActivity>,
     event: Event,
 ) {
     match event.event_type {
@@ -115,6 +180,7 @@ fn handle_event(
             }
         }
         EventType::ButtonPress(Button::Left) => {
+            input.note_pointer_activity();
             let (x, y) = gesture
                 .lock()
                 .map(|mut current| {
@@ -125,6 +191,7 @@ fn handle_event(
             hide_toolbar_when_outside(app, x, y);
         }
         EventType::ButtonRelease(Button::Left) => {
+            input.note_pointer_activity();
             if !enabled.load(Ordering::Acquire) {
                 return;
             }
@@ -146,29 +213,41 @@ fn handle_event(
             });
             if let Some(points) = candidate {
                 let capture_id = generation.fetch_add(1, Ordering::AcqRel) + 1;
+                let expected_input_epoch = input.snapshot();
                 let app = app.clone();
-                let enabled = enabled.clone();
-                let generation = generation.clone();
-                thread::spawn(move || {
-                    capture_selection(app, enabled, generation, capture_id, points)
-                });
+                let guard = CaptureGuard {
+                    enabled: enabled.clone(),
+                    generation: generation.clone(),
+                    input: input.clone(),
+                    capture_id,
+                    expected_input_epoch,
+                };
+                thread::spawn(move || capture_selection(app, guard, points));
             }
         }
-        EventType::Wheel { .. } => hide_toolbar(app),
-        EventType::KeyPress(key) if !is_modifier(key) => hide_toolbar(app),
-        _ => {}
+        EventType::ButtonPress(_) | EventType::ButtonRelease(_) => {
+            input.note_pointer_activity();
+            hide_toolbar(app);
+        }
+        EventType::Wheel { .. } => {
+            input.note_pointer_activity();
+            hide_toolbar(app);
+        }
+        EventType::KeyPress(key) => {
+            input.note_key_press(key);
+            if !is_modifier(key) {
+                hide_toolbar(app);
+            }
+        }
+        EventType::KeyRelease(key) => {
+            input.note_key_release(key);
+        }
     }
 }
 
-fn capture_selection(
-    app: tauri::AppHandle,
-    enabled: Arc<AtomicBool>,
-    generation: Arc<AtomicU64>,
-    capture_id: u64,
-    points: (f64, f64, f64, f64),
-) {
-    thread::sleep(Duration::from_millis(75));
-    if !enabled.load(Ordering::Acquire) || generation.load(Ordering::Acquire) != capture_id {
+fn capture_selection(app: tauri::AppHandle, guard: CaptureGuard, points: (f64, f64, f64, f64)) {
+    thread::sleep(SELECTION_SETTLE_DELAY);
+    if !guard.is_current() {
         return;
     }
     let active_window = active_win_pos_rs::get_active_window().ok();
@@ -190,17 +269,15 @@ fn capture_selection(
     if !allowed {
         return;
     }
-
-    let mut text = selected_text(&app);
-    if text.trim().is_empty() {
-        thread::sleep(Duration::from_millis(140));
-        if generation.load(Ordering::Acquire) != capture_id {
-            return;
-        }
-        text = selected_text(&app);
+    if !guard.is_current() {
+        return;
     }
+
+    // Only inject one copy shortcut. Repeating it widens the interval in which
+    // a user's own Ctrl/Cmd+C can race with CitrI's temporary modifier state.
+    let text = selected_text(&app, &guard);
     let text = text.trim().chars().take(200_000).collect::<String>();
-    if text.is_empty() || generation.load(Ordering::Acquire) != capture_id {
+    if text.is_empty() || guard.generation.load(Ordering::Acquire) != guard.capture_id {
         return;
     }
     let payload = SelectionPayload {
@@ -223,7 +300,7 @@ fn capture_selection(
 }
 
 #[cfg(target_os = "linux")]
-fn selected_text(_app: &tauri::AppHandle) -> String {
+fn selected_text(_app: &tauri::AppHandle, _guard: &CaptureGuard) -> String {
     let Ok(clipboard) = x11_clipboard::Clipboard::new() else {
         return String::new();
     };
@@ -240,7 +317,7 @@ fn selected_text(_app: &tauri::AppHandle) -> String {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn selected_text(app: &tauri::AppHandle) -> String {
+fn selected_text(app: &tauri::AppHandle, guard: &CaptureGuard) -> String {
     enum ClipboardBackup {
         Text(String),
         Image(tauri::image::Image<'static>),
@@ -255,6 +332,9 @@ fn selected_text(app: &tauri::AppHandle) -> String {
     } else {
         ClipboardBackup::Empty
     };
+    if !guard.is_current() {
+        return String::new();
+    }
     let _ = clipboard.clear();
 
     #[cfg(target_os = "macos")]
@@ -269,7 +349,9 @@ fn selected_text(app: &tauri::AppHandle) -> String {
     let mut selected = String::new();
     for _ in 0..12 {
         thread::sleep(Duration::from_millis(20));
-        if let Ok(text) = clipboard.read_text() {
+        if let Ok(text) = clipboard.read_text()
+            && !text.is_empty()
+        {
             selected = text;
             break;
         }
@@ -457,5 +539,43 @@ mod tests {
             Some("Code"),
             Some("code.exe")
         ));
+    }
+
+    #[test]
+    fn any_user_input_or_held_key_cancels_pending_capture() {
+        let input = Arc::new(InputActivity::default());
+        let guard = CaptureGuard {
+            enabled: Arc::new(AtomicBool::new(true)),
+            generation: Arc::new(AtomicU64::new(7)),
+            input: input.clone(),
+            capture_id: 7,
+            expected_input_epoch: input.snapshot(),
+        };
+
+        assert!(guard.is_current());
+        input.note_key_press(Key::KeyA);
+        assert!(!guard.is_current());
+        input.note_key_release(Key::KeyA);
+        assert!(!guard.is_current());
+
+        let while_key_is_held = CaptureGuard {
+            expected_input_epoch: input.snapshot(),
+            ..guard
+        };
+        input.note_key_press(Key::ShiftLeft);
+        let after_press = CaptureGuard {
+            expected_input_epoch: input.snapshot(),
+            ..while_key_is_held
+        };
+        assert!(!after_press.is_current());
+        input.note_key_release(Key::ShiftLeft);
+
+        let before_pointer = CaptureGuard {
+            expected_input_epoch: input.snapshot(),
+            ..after_press
+        };
+        assert!(before_pointer.is_current());
+        input.note_pointer_activity();
+        assert!(!before_pointer.is_current());
     }
 }
