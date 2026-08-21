@@ -2,11 +2,15 @@
 import { computed, onMounted, ref, toRaw } from 'vue'
 import AppIcon from '@/components/AppIcon.vue'
 import { command, errorMessage } from '@/lib/bridge'
+import { normalizeExtraParameterValue } from '@/lib/extraParameters'
 import type { ApiProfile, ExtraParameter, ExtraParameterType, JsonValue, Settings } from '@/types'
 
 type StatusKind = 'normal' | 'success' | 'error'
 const settings = defineModel<Settings>({ required: true })
-const emit = defineEmits<{ status: [message: string, kind?: StatusKind] }>()
+const emit = defineEmits<{
+  status: [message: string, kind?: StatusKind]
+  'draft-change': []
+}>()
 const testing = ref(false)
 const showKey = ref(false)
 const extraParameters = ref<ExtraParameter[]>([])
@@ -93,9 +97,12 @@ function deleteProfile(): void {
 }
 
 function changeParameterType(parameter: ExtraParameter): void {
-  if (parameter.type === 'boolean' && !['true', 'false'].includes(parameter.value)) parameter.value = 'false'
-  if (parameter.type === 'number' && !Number.isFinite(Number(parameter.value))) parameter.value = '0'
-  if (parameter.type === 'json' && !parameter.value.trim()) parameter.value = '{}'
+  normalizeExtraParameterValue(parameter)
+}
+
+function addParameter(): void {
+  extraParameters.value.push({ key: '', type: 'boolean', value: 'false' })
+  emit('draft-change')
 }
 
 async function testApi(): Promise<void> {
@@ -127,7 +134,7 @@ defineExpose({ commit, reload })
           <label class="field"><span>最大输出 Token</span><input v-model.number="activeProfile.maxTokens" type="number" min="1" max="128000" /></label>
           <div class="field test-field"><span>连接测试</span><button class="secondary-button" type="button" :disabled="testing" data-no-autosave @click="testApi">{{ testing ? '测试中…' : '测试当前 API' }}</button></div>
           <label class="field field-wide"><span>系统 Prompt</span><textarea v-model="activeProfile.systemPrompt" rows="3" /></label>
-          <div class="field field-wide"><div class="parameter-heading"><span>额外 API 请求参数</span><button class="secondary-button small-button" type="button" data-no-autosave @click="extraParameters.push({ key: '', type: 'boolean', value: 'false' })"><AppIcon name="plus" :size="13" />添加参数</button></div>
+          <div class="field field-wide"><div class="parameter-heading"><span>额外 API 请求参数</span><button class="secondary-button small-button" type="button" data-no-autosave @click="addParameter"><AppIcon name="plus" :size="13" />添加参数</button></div>
             <div v-if="!extraParameters.length" class="parameter-empty">暂无额外参数</div>
             <div v-for="(parameter, index) in extraParameters" :key="index" class="parameter-row">
               <input v-model="parameter.key" placeholder="参数名称" spellcheck="false" />

@@ -64,6 +64,12 @@ function noteDraftEdit(event: Event): void {
   if (isTextField(event.target)) editedFields.add(event.target)
 }
 
+function noteLocalDraftChange(): void {
+  // API parameter rows live outside `settings` until ApiSettings commits them.
+  // Invalidate any older save response so its reload cannot discard a new row.
+  editRevision += 1
+}
+
 function handleControlChange(event: Event): void {
   if (!isTextField(event.target)) requestSave()
 }
@@ -76,7 +82,7 @@ function handleControlFocusOut(event: FocusEvent): void {
 
 function handleControlClick(event: MouseEvent): void {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button')
-  if (button && !button.dataset.noAutosave) requestSave()
+  if (button && !button.hasAttribute('data-no-autosave')) requestSave()
 }
 
 async function flushSaves(): Promise<void> {
@@ -102,6 +108,8 @@ async function flushSaves(): Promise<void> {
           apiSettings.value?.reload()
           applyAppearance(saved)
           setStatus('已自动保存', 'success')
+        } else if (!saveRequested) {
+          setStatus('')
         }
       } catch (error) {
         setStatus(errorMessage(error), 'error')
@@ -157,7 +165,7 @@ onBeforeUnmount(() => {
 
         <GeneralSettings v-show="page === 'general'" v-model="settings" />
 
-        <ApiSettings ref="apiSettings" v-show="page === 'api'" v-model="settings" @status="setStatus" />
+        <ApiSettings ref="apiSettings" v-show="page === 'api'" v-model="settings" @status="setStatus" @draft-change="noteLocalDraftChange" />
 
         <ActionsSettings v-show="page === 'actions'" v-model="settings" />
         <AppearanceSettings v-show="page === 'appearance'" v-model="settings" />
