@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "citri"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "active-win-pos-rs",
  "atomic-write-file",
@@ -620,6 +620,7 @@ dependencies = [
  "tokio-util",
  "ts-rs",
  "urlencoding",
+ "winapi",
  "x11-clipboard",
 ]
 

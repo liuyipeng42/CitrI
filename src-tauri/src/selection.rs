@@ -4,12 +4,14 @@ use crate::{
     models::{FilterMode, SelectionPayload},
 };
 use rdev::{Button, Event, EventType, Key, listen};
+#[cfg(not(target_os = "windows"))]
+use std::collections::HashSet;
 use std::{
-    collections::HashSet,
     path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -50,6 +52,7 @@ struct Gesture {
 #[derive(Default)]
 struct InputActivity {
     epoch: AtomicU64,
+    #[cfg(not(target_os = "windows"))]
     pressed_keys: Mutex<HashSet<Key>>,
 }
 
@@ -58,20 +61,22 @@ impl InputActivity {
         self.epoch.load(Ordering::Acquire)
     }
 
-    fn note_key_press(&self, key: Key) {
+    fn note_key_press(&self, _key: Key) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        #[cfg(not(target_os = "windows"))]
         self.pressed_keys
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(key);
+            .insert(_key);
     }
 
-    fn note_key_release(&self, key: Key) {
+    fn note_key_release(&self, _key: Key) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        #[cfg(not(target_os = "windows"))]
         self.pressed_keys
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&key);
+            .remove(&_key);
     }
 
     fn note_pointer_activity(&self) {
@@ -79,13 +84,39 @@ impl InputActivity {
     }
 
     fn is_idle_since(&self, expected_epoch: u64) -> bool {
-        self.epoch.load(Ordering::Acquire) == expected_epoch
-            && self
-                .pressed_keys
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty()
+        self.is_idle_since_with(expected_epoch, || {
+            #[cfg(target_os = "windows")]
+            {
+                windows_keyboard_idle()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                self.pressed_keys
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_empty()
+            }
+        })
     }
+
+    fn is_idle_since_with(
+        &self,
+        expected_epoch: u64,
+        keyboard_idle: impl FnOnce() -> bool,
+    ) -> bool {
+        self.epoch.load(Ordering::Acquire) == expected_epoch
+            && keyboard_idle()
+            && self.epoch.load(Ordering::Acquire) == expected_epoch
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_keyboard_idle() -> bool {
+    // Locking the desktop (e.g. Win+L) can swallow key-up events. Query the
+    // current state on the capture worker, never inside a low-level hook:
+    // Windows updates asynchronous key state only after the hook returns.
+    // Codes 1..=6 are mouse buttons/reserved, not keyboard keys.
+    (8..=254).all(|key| unsafe { winapi::um::winuser::GetAsyncKeyState(key) >= 0 })
 }
 
 struct CaptureGuard {
@@ -135,22 +166,19 @@ impl SelectionController {
         let enabled = self.enabled.clone();
         let generation = self.generation.clone();
         let input = self.input.clone();
+        let (event_sender, event_receiver) = mpsc::channel();
+        let worker_app = app.clone();
         thread::spawn(move || {
             let gesture = Arc::new(Mutex::new(Gesture::default()));
-            let callback_app = app.clone();
-            let callback_gesture = gesture.clone();
-            let callback_enabled = enabled.clone();
-            let callback_generation = generation.clone();
-            let callback_input = input.clone();
+            for event in event_receiver {
+                handle_event(&worker_app, &gesture, &enabled, &generation, &input, event);
+            }
+        });
+        thread::spawn(move || {
+            // Keep the OS hook callback short: locks, UI dispatch and worker
+            // creation must not delay the hook and cause Windows to remove it.
             let result = listen(move |event| {
-                handle_event(
-                    &callback_app,
-                    &callback_gesture,
-                    &callback_enabled,
-                    &callback_generation,
-                    &callback_input,
-                    event,
-                )
+                let _ = event_sender.send(event);
             });
             if let Err(error) = result {
                 let message = format!("划词监听器启动失败：{error:?}");
@@ -180,6 +208,7 @@ fn handle_event(
             }
         }
         EventType::ButtonPress(Button::Left) => {
+            generation.fetch_add(1, Ordering::AcqRel);
             input.note_pointer_activity();
             let (x, y) = gesture
                 .lock()
@@ -226,10 +255,12 @@ fn handle_event(
             }
         }
         EventType::ButtonPress(_) | EventType::ButtonRelease(_) => {
+            generation.fetch_add(1, Ordering::AcqRel);
             input.note_pointer_activity();
             hide_toolbar(app);
         }
         EventType::Wheel { .. } => {
+            generation.fetch_add(1, Ordering::AcqRel);
             input.note_pointer_activity();
             hide_toolbar(app);
         }
@@ -286,10 +317,17 @@ fn capture_selection(app: tauri::AppHandle, guard: CaptureGuard, points: (f64, f
         y: points.3.round() as i32,
         app_name,
     };
-    state.set_latest_selection(payload.clone());
     let ui_app = app.clone();
     let dispatcher = app.clone();
     let _ = dispatcher.run_on_main_thread(move || {
+        if !guard.enabled.load(Ordering::Acquire)
+            || guard.generation.load(Ordering::Acquire) != guard.capture_id
+        {
+            return;
+        }
+        ui_app
+            .state::<AppState>()
+            .set_latest_selection(payload.clone());
         position_toolbar(&ui_app, points);
         let _ = ui_app.emit_to("toolbar", "selection-selected", payload);
         if let Some(toolbar) = ui_app.get_webview_window("toolbar") {
@@ -318,6 +356,11 @@ fn selected_text(_app: &tauri::AppHandle, _guard: &CaptureGuard) -> String {
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn selected_text(app: &tauri::AppHandle, guard: &CaptureGuard) -> String {
+    // Captures must not back up or restore each other's temporary clipboard.
+    static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+    let Ok(_capture) = CAPTURE_LOCK.try_lock() else {
+        return String::new();
+    };
     enum ClipboardBackup {
         Text(String),
         Image(tauri::image::Image<'static>),
@@ -335,7 +378,9 @@ fn selected_text(app: &tauri::AppHandle, guard: &CaptureGuard) -> String {
     if !guard.is_current() {
         return String::new();
     }
-    let _ = clipboard.clear();
+    if clipboard.clear().is_err() {
+        return String::new();
+    }
 
     #[cfg(target_os = "macos")]
     let modifier = Key::MetaLeft;
@@ -543,39 +588,39 @@ mod tests {
 
     #[test]
     fn any_user_input_or_held_key_cancels_pending_capture() {
-        let input = Arc::new(InputActivity::default());
-        let guard = CaptureGuard {
-            enabled: Arc::new(AtomicBool::new(true)),
-            generation: Arc::new(AtomicU64::new(7)),
-            input: input.clone(),
-            capture_id: 7,
-            expected_input_epoch: input.snapshot(),
-        };
-
-        assert!(guard.is_current());
+        let input = InputActivity::default();
+        let epoch = input.snapshot();
+        assert!(input.is_idle_since_with(epoch, || true));
         input.note_key_press(Key::KeyA);
-        assert!(!guard.is_current());
+        assert!(!input.is_idle_since_with(epoch, || true));
         input.note_key_release(Key::KeyA);
-        assert!(!guard.is_current());
-
-        let while_key_is_held = CaptureGuard {
-            expected_input_epoch: input.snapshot(),
-            ..guard
-        };
-        input.note_key_press(Key::ShiftLeft);
-        let after_press = CaptureGuard {
-            expected_input_epoch: input.snapshot(),
-            ..while_key_is_held
-        };
-        assert!(!after_press.is_current());
-        input.note_key_release(Key::ShiftLeft);
-
-        let before_pointer = CaptureGuard {
-            expected_input_epoch: input.snapshot(),
-            ..after_press
-        };
-        assert!(before_pointer.is_current());
+        assert!(!input.is_idle_since_with(epoch, || true));
+        let epoch = input.snapshot();
+        assert!(!input.is_idle_since_with(epoch, || false));
+        assert!(input.is_idle_since_with(epoch, || true));
         input.note_pointer_activity();
-        assert!(!before_pointer.is_current());
+        assert!(!input.is_idle_since_with(epoch, || true));
+    }
+
+    #[test]
+    fn missing_lock_screen_key_up_does_not_block_future_captures() {
+        let input = InputActivity::default();
+        input.note_key_press(Key::MetaLeft);
+        input.note_key_press(Key::KeyL);
+        // The secure desktop consumes the releases; physical keys are now up.
+        input.note_pointer_activity();
+        let epoch = input.snapshot();
+        assert!(input.is_idle_since_with(epoch, || true));
+        // A key actually held after unlocking must still block capture.
+        assert!(!input.is_idle_since_with(epoch, || false));
+    }
+
+    #[test]
+    fn input_during_physical_state_query_cancels_capture() {
+        let input = InputActivity::default();
+        assert!(!input.is_idle_since_with(input.snapshot(), || {
+            input.note_key_press(Key::ControlLeft);
+            true
+        }));
     }
 }

@@ -81,6 +81,29 @@ fn extract_text(payload: &Value) -> String {
         .unwrap_or_default()
 }
 
+fn check_api_error(payload: &Value) -> Result<(), String> {
+    if let Some(error) = payload.get("error").filter(|error| !error.is_null()) {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| error.as_str())
+            .unwrap_or("服务返回了错误对象");
+        return Err(format!(
+            "API 错误：{}",
+            message.chars().take(2000).collect::<String>()
+        ));
+    }
+    Ok(())
+}
+
+fn require_response_text(text: String) -> Result<String, String> {
+    if text.trim().is_empty() {
+        Err("API 未返回文本内容，请检查模型和接口配置".into())
+    } else {
+        Ok(text)
+    }
+}
+
 fn parse_sse_block(block: &str) -> Result<(bool, String), String> {
     let data = block
         .lines()
@@ -97,6 +120,7 @@ fn parse_sse_block(block: &str) -> Result<(bool, String), String> {
     }
     let payload: Value =
         serde_json::from_str(data).map_err(|error| format!("API 流数据格式错误：{error}"))?;
+    check_api_error(&payload)?;
     Ok((false, extract_text(&payload)))
 }
 
@@ -193,15 +217,16 @@ pub async fn stream_chat_completion(
     }
 
     if !content_type.contains("text/event-stream") {
-        let payload: Value = response
-            .json()
-            .await
-            .map_err(|error| format!("API 响应格式错误：{error}"))?;
+        let payload: Value = tokio::select! {
+            _ = cancellation.cancelled() => return Err("__CANCELLED__".into()),
+            payload = response.json() => payload.map_err(|error| format!("API 响应格式错误：{error}"))?,
+        };
+        check_api_error(&payload)?;
         let text = extract_text(&payload);
         if !text.is_empty() {
             on_delta(text.clone());
         }
-        return Ok(text);
+        return require_response_text(text);
     }
 
     let mut stream = response.bytes_stream();
@@ -224,7 +249,7 @@ pub async fn stream_chat_completion(
                 String::from_utf8(block).map_err(|_| "API 流不是有效 UTF-8 文本".to_string())?;
             let (done, delta) = parse_sse_block(&block)?;
             if done {
-                return Ok(result);
+                return require_response_text(result);
             }
             if !delta.is_empty() {
                 result.push_str(&delta);
@@ -241,12 +266,26 @@ pub async fn stream_chat_completion(
             on_delta(delta);
         }
     }
-    Ok(result)
+    require_response_text(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_errors_inside_successful_api_responses() {
+        let payload = json!({"error": {"message": "quota exceeded"}});
+        assert!(
+            check_api_error(&payload)
+                .unwrap_err()
+                .contains("quota exceeded")
+        );
+        assert!(parse_sse_block(&format!("data: {payload}")).is_err());
+        assert!(require_response_text(String::new()).is_err());
+        assert!(require_response_text(" \n".into()).is_err());
+        assert_eq!(require_response_text("OK".into()).unwrap(), "OK");
+    }
 
     #[test]
     fn normalizes_compatible_urls() {

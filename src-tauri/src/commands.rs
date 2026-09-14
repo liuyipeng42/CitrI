@@ -61,17 +61,8 @@ pub async fn test_api(window: WebviewWindow, profile: ApiProfile) -> Result<Stri
     .sanitized()
     .active_profile();
     let cancellation = CancellationToken::new();
-    let mut result = String::new();
-    stream_chat_completion(&profile, "请只回复 OK", &cancellation, |delta| {
-        result.push_str(&delta)
-    })
-    .await?;
-    let result = result.trim();
-    Ok(if result.is_empty() {
-        "OK".into()
-    } else {
-        result.into()
-    })
+    let result = stream_chat_completion(&profile, "请只回复 OK", &cancellation, |_| {}).await?;
+    Ok(result.trim().into())
 }
 
 #[tauri::command]

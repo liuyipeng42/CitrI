@@ -42,20 +42,17 @@ impl SettingsStore {
     }
 
     pub fn save(&self, mut value: Settings) -> Result<Settings, String> {
-        let (width, height) =
-            self.read(|current| (current.action_window_width, current.action_window_height));
-        value.action_window_width = width;
-        value.action_window_height = height;
+        // Serialize the disk write and memory update with window-size saves.
+        let mut current = self
+            .value
+            .write()
+            .map_err(|_| "设置存储已损坏".to_string())?;
+        value.action_window_width = current.action_window_width;
+        value.action_window_height = current.action_window_height;
         let value = value.sanitized();
         self.persist_value(&value)
             .map_err(|error| format!("无法保存设置：{error}"))?;
-        {
-            let mut current = self
-                .value
-                .write()
-                .map_err(|_| "设置存储已损坏".to_string())?;
-            *current = value.clone();
-        }
+        *current = value.clone();
         Ok(value)
     }
 
@@ -103,6 +100,25 @@ impl SettingsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_settings_form_preserves_latest_window_size() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        let mut settings = store.get();
+        settings.remember_action_window_size = true;
+        let mut stale_form = store.save(settings).unwrap();
+        store.save_action_window_size(800, 600).unwrap();
+        stale_form.compact = true;
+        store.save(stale_form).unwrap();
+        let saved = SettingsStore::load(path).get();
+        assert!(saved.compact);
+        assert_eq!(
+            (saved.action_window_width, saved.action_window_height),
+            (800, 600)
+        );
+    }
 
     #[test]
     fn round_trips_settings_atomically() {

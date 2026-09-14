@@ -346,6 +346,10 @@ impl ActionWindowSession {
     }
 
     pub fn note_window_size(&mut self, width: u32, height: u32) {
+        // Minimizing can report a zero client area. Preserve the restore size.
+        if width == 0 || height == 0 {
+            return;
+        }
         self.last_window_size = Some((width, height));
         self.note_native_window_change();
     }
@@ -681,6 +685,8 @@ mod tests {
         };
 
         session.note_window_size(720, 560);
+        assert_eq!(session.last_window_size, Some((720, 560)));
+        session.note_window_size(0, 0);
         assert_eq!(session.last_window_size, Some((720, 560)));
     }
 }
