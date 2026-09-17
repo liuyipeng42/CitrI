@@ -200,7 +200,12 @@ pub async fn assistant_start(
     }
     let result = stream_chat_completion(&profile, &prompt, &cancellation, |delta| {
         if state.request_is_current(&label, request_id) {
-            let _ = window.emit("assistant-delta", delta);
+            if !delta.reasoning.is_empty() {
+                let _ = window.emit("assistant-reasoning", delta.reasoning);
+            }
+            if !delta.content.is_empty() {
+                let _ = window.emit("assistant-delta", delta.content);
+            }
         }
     })
     .await;

@@ -96,15 +96,55 @@ fn check_api_error(payload: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn require_response_text(text: String) -> Result<String, String> {
-    if text.trim().is_empty() {
-        Err("API 未返回文本内容，请检查模型和接口配置".into())
-    } else {
-        Ok(text)
+#[derive(Default, Debug)]
+pub struct ChatDelta {
+    pub content: String,
+    pub reasoning: String,
+    finish_reason: Option<String>,
+}
+
+fn extract_delta(payload: &Value) -> ChatDelta {
+    let reasoning = ["delta", "message"]
+        .into_iter()
+        .find_map(|kind| {
+            ["reasoning_content", "reasoning"]
+                .into_iter()
+                .find_map(|field| {
+                    payload
+                        .pointer(&format!("/choices/0/{kind}/{field}"))
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                })
+        })
+        .unwrap_or_default()
+        .to_owned();
+    ChatDelta {
+        content: extract_text(payload),
+        reasoning,
+        finish_reason: payload
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     }
 }
 
-fn parse_sse_block(block: &str) -> Result<(bool, String), String> {
+fn require_response_text(response: ChatDelta) -> Result<String, String> {
+    if response.finish_reason.as_deref() == Some("length") {
+        return Err(
+            "已达到输出 Token 上限，回答可能未完成；请提高设置中的最大输出 Token 后重试".into(),
+        );
+    }
+    if response.content.trim().is_empty() && !response.reasoning.trim().is_empty() {
+        return Err("模型仅返回了思考内容，未返回最终回答；思考内容已保留，可提高最大输出 Token 或检查服务端结束原因后重试".into());
+    }
+    if response.content.trim().is_empty() {
+        Err("API 未返回文本内容，请检查模型和接口配置".into())
+    } else {
+        Ok(response.content)
+    }
+}
+
+fn parse_sse_block(block: &str) -> Result<(bool, ChatDelta), String> {
     let data = block
         .lines()
         .filter_map(|line| line.strip_prefix("data:"))
@@ -113,15 +153,26 @@ fn parse_sse_block(block: &str) -> Result<(bool, String), String> {
         .join("\n");
     let data = data.trim();
     if data.is_empty() {
-        return Ok((false, String::new()));
+        return Ok((false, ChatDelta::default()));
     }
     if data == "[DONE]" {
-        return Ok((true, String::new()));
+        return Ok((true, ChatDelta::default()));
     }
     let payload: Value =
         serde_json::from_str(data).map_err(|error| format!("API 流数据格式错误：{error}"))?;
     check_api_error(&payload)?;
-    Ok((false, extract_text(&payload)))
+    Ok((false, extract_delta(&payload)))
+}
+
+fn append_delta(result: &mut ChatDelta, delta: ChatDelta, on_delta: &mut impl FnMut(ChatDelta)) {
+    result.content.push_str(&delta.content);
+    result.reasoning.push_str(&delta.reasoning);
+    if delta.finish_reason.is_some() {
+        result.finish_reason = delta.finish_reason.clone();
+    }
+    if !delta.content.is_empty() || !delta.reasoning.is_empty() {
+        on_delta(delta);
+    }
 }
 
 fn next_sse_block(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
@@ -168,7 +219,7 @@ pub async fn stream_chat_completion(
     profile: &ApiProfile,
     prompt: &str,
     cancellation: &CancellationToken,
-    mut on_delta: impl FnMut(String),
+    mut on_delta: impl FnMut(ChatDelta),
 ) -> Result<String, String> {
     if profile.api_key.trim().is_empty() {
         return Err("请先在设置中填写 API Key".into());
@@ -222,16 +273,14 @@ pub async fn stream_chat_completion(
             payload = response.json() => payload.map_err(|error| format!("API 响应格式错误：{error}"))?,
         };
         check_api_error(&payload)?;
-        let text = extract_text(&payload);
-        if !text.is_empty() {
-            on_delta(text.clone());
-        }
-        return require_response_text(text);
+        let mut result = ChatDelta::default();
+        append_delta(&mut result, extract_delta(&payload), &mut on_delta);
+        return require_response_text(result);
     }
 
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
-    let mut result = String::new();
+    let mut result = ChatDelta::default();
     loop {
         let next = tokio::select! {
             _ = cancellation.cancelled() => return Err("__CANCELLED__".into()),
@@ -251,20 +300,14 @@ pub async fn stream_chat_completion(
             if done {
                 return require_response_text(result);
             }
-            if !delta.is_empty() {
-                result.push_str(&delta);
-                on_delta(delta);
-            }
+            append_delta(&mut result, delta, &mut on_delta);
         }
     }
     if !buffer.iter().all(u8::is_ascii_whitespace) {
         let block =
             String::from_utf8(buffer).map_err(|_| "API 流不是有效 UTF-8 文本".to_string())?;
         let (_, delta) = parse_sse_block(&block)?;
-        if !delta.is_empty() {
-            result.push_str(&delta);
-            on_delta(delta);
-        }
+        append_delta(&mut result, delta, &mut on_delta);
     }
     require_response_text(result)
 }
@@ -272,6 +315,64 @@ pub async fn stream_chat_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_chunks_are_emitted_before_the_final_answer() {
+        let mut result = ChatDelta::default();
+        let mut events = Vec::new();
+        for payload in [
+            json!({"choices":[{"delta":{"reasoning_content":"分析问题"}}]}),
+            json!({"choices":[{"delta":{"reasoning":"，核对结果"}}]}),
+            json!({"choices":[{"delta":{"content":"最终回答"}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}]}),
+            json!({"choices":[],"usage":{"completion_tokens":100}}),
+        ] {
+            let (done, delta) = parse_sse_block(&format!("data: {payload}")).unwrap();
+            assert!(!done);
+            append_delta(&mut result, delta, &mut |delta| events.push(delta));
+        }
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].reasoning, "分析问题");
+        assert!(events[0].content.is_empty());
+        assert_eq!(result.reasoning, "分析问题，核对结果");
+        assert_eq!(result.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(require_response_text(result).unwrap(), "最终回答");
+    }
+
+    #[test]
+    fn reasoning_only_and_token_limit_have_specific_errors() {
+        let payload = json!({"choices":[{"message":{"content":null,"reasoning_content":"思考内容"},"finish_reason":"length"}]});
+        let delta = extract_delta(&payload);
+        assert_eq!(delta.reasoning, "思考内容");
+        assert!(
+            require_response_text(delta)
+                .unwrap_err()
+                .contains("Token 上限")
+        );
+        let payload = json!({"choices":[{"message":{"content":null,"reasoning_content":"思考内容"},"finish_reason":"stop"}]});
+        assert!(
+            require_response_text(extract_delta(&payload))
+                .unwrap_err()
+                .contains("仅返回了思考内容")
+        );
+    }
+
+    #[test]
+    fn fragmented_utf8_stream_preserves_reasoning() {
+        let bytes = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"思考\"}}]}\r\n\r\ndata: [DONE]\n\n".as_bytes();
+        let mut buffer = Vec::new();
+        let mut events = Vec::new();
+        for byte in bytes {
+            buffer.push(*byte);
+            while let Some(block) = next_sse_block(&mut buffer) {
+                events.push(parse_sse_block(&String::from_utf8(block).unwrap()).unwrap());
+            }
+        }
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].1.reasoning, "思考");
+        assert!(events[1].0);
+        assert!(buffer.is_empty());
+    }
 
     #[test]
     fn reports_errors_inside_successful_api_responses() {
@@ -282,9 +383,15 @@ mod tests {
                 .contains("quota exceeded")
         );
         assert!(parse_sse_block(&format!("data: {payload}")).is_err());
-        assert!(require_response_text(String::new()).is_err());
-        assert!(require_response_text(" \n".into()).is_err());
-        assert_eq!(require_response_text("OK".into()).unwrap(), "OK");
+        assert!(require_response_text(ChatDelta::default()).is_err());
+        assert_eq!(
+            require_response_text(ChatDelta {
+                content: "OK".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+            "OK"
+        );
     }
 
     #[test]
@@ -313,7 +420,7 @@ mod tests {
         let (done, delta) =
             parse_sse_block("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}").unwrap();
         assert!(!done);
-        assert_eq!(delta, "Hi");
+        assert_eq!(delta.content, "Hi");
         assert!(parse_sse_block("data: [DONE]").unwrap().0);
         let mut profile = ApiProfile::default();
         profile

@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use std::{thread, time::Duration};
+use std::{sync::mpsc, thread, time::Duration};
 use tauri::Manager;
 
 fn cursor_is_near_window(window: &tauri::Window) -> bool {
@@ -20,28 +20,51 @@ fn cursor_is_near_window(window: &tauri::Window) -> bool {
 
 fn schedule_action_auto_close(app: tauri::AppHandle, label: String) {
     thread::spawn(move || {
-        thread::sleep(Duration::from_millis(250));
-        let dispatcher = app.clone();
-        let _ = dispatcher.run_on_main_thread(move || {
-            let Some(webview_window) = app.get_webview_window(&label) else {
-                return;
-            };
-            let window = webview_window.as_ref().window();
-            let state = app.state::<AppState>();
-            if !state.settings.read(|settings| settings.auto_close) {
-                return;
-            }
-            let focused = window.is_focused().unwrap_or(false);
-            let cursor_near_window = cursor_is_near_window(&window);
-            let should_close = state
-                .with_session(&label, |session| {
-                    session.should_close_after_blur(focused, cursor_near_window)
+        loop {
+            thread::sleep(Duration::from_millis(250));
+            let dispatcher = app.clone();
+            let check_app = app.clone();
+            let check_label = label.clone();
+            let (sender, receiver) = mpsc::sync_channel(1);
+            if dispatcher
+                .run_on_main_thread(move || {
+                    let Some(webview_window) = check_app.get_webview_window(&check_label) else {
+                        return;
+                    };
+                    let window = webview_window.as_ref().window();
+                    let state = check_app.state::<AppState>();
+                    if !state.settings.read(|settings| settings.auto_close) {
+                        return;
+                    }
+                    let focused = window.is_focused().unwrap_or(true);
+                    if focused || window.is_minimized().unwrap_or(true) {
+                        return;
+                    }
+                    let cursor_near_window = cursor_is_near_window(&window);
+                    let should_close = state
+                        .with_session(&check_label, |session| {
+                            session.should_close_after_blur(focused, cursor_near_window)
+                        })
+                        .unwrap_or(false);
+                    if should_close {
+                        let _ = window.close();
+                        return;
+                    }
+                    // Cursor proximity and native drag/resize protection are temporary.
+                    // Continue checking instead of losing the original blur forever.
+                    let retry = state
+                        .with_session(&check_label, |session| {
+                            session.auto_close_armed && !session.pinned
+                        })
+                        .unwrap_or(false);
+                    let _ = sender.send(retry);
                 })
-                .unwrap_or(false);
-            if should_close {
-                let _ = window.close();
+                .is_err()
+                || !receiver.recv().unwrap_or(false)
+            {
+                break;
             }
-        });
+        }
     });
 }
 

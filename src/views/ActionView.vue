@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
@@ -13,6 +13,11 @@ marked.setOptions({ gfm: true, breaks: true })
 
 const session = ref<ActionSession | null>(null)
 const result = ref('')
+const reasoning = ref('')
+const reasoningExpanded = ref(true)
+const reasoningFinished = ref(false)
+const reasoningScroll = ref<HTMLElement | null>(null)
+const reasoningActive = computed(() => loading.value && !reasoningFinished.value)
 const renderedResult = ref('')
 const error = ref('')
 const loading = ref(true)
@@ -35,6 +40,39 @@ let footerTimer: number | undefined
 let copyTimer: number | undefined
 let renderFrame: number | undefined
 let footerHideAt = 0
+let reasoningFrame: number | undefined
+
+function finishReasoning(): void {
+  if (reasoningFinished.value) return
+  reasoningFinished.value = true
+  reasoningExpanded.value = false
+  if (reasoningFrame !== undefined) cancelAnimationFrame(reasoningFrame)
+  reasoningFrame = undefined
+}
+
+function followReasoning(): void {
+  if (reasoningFrame !== undefined || !reasoningActive.value || !reasoningExpanded.value) return
+  let previous = performance.now()
+  const step = (now: number): void => {
+    reasoningFrame = undefined
+    const viewport = reasoningScroll.value
+    if (!viewport || !reasoningActive.value || !reasoningExpanded.value) return
+    const target = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    const distance = target - viewport.scrollTop
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (Math.abs(distance) < 1 || reducedMotion) {
+      viewport.scrollTop = target
+      return
+    }
+    const movement = Math.max(1, Math.abs(distance) * (1 - Math.exp(-(now - previous) / 65)))
+    viewport.scrollTop += Math.sign(distance) * Math.min(Math.abs(distance), movement)
+    previous = now
+    reasoningFrame = requestAnimationFrame(step)
+  }
+  reasoningFrame = requestAnimationFrame(step)
+}
+
+watch([reasoning, reasoningExpanded], followReasoning, { flush: 'post' })
 
 function queueRender(): void {
   if (renderFrame !== undefined) return
@@ -54,11 +92,15 @@ function start(): void {
   if (renderFrame !== undefined) cancelAnimationFrame(renderFrame)
   renderFrame = undefined
   result.value = ''
+  reasoning.value = ''
+  reasoningExpanded.value = true
+  reasoningFinished.value = false
   renderedResult.value = ''
   error.value = ''
   loading.value = true
   autoScroll.value = true
   void command<void>('assistant_start').catch((reason) => {
+    finishReasoning()
     loading.value = false
     error.value = errorMessage(reason)
   })
@@ -149,13 +191,17 @@ function onBlur(): void {
 }
 
 onMounted(async () => {
+  unlisteners.push(await onEvent<string>('assistant-reasoning', (event) => {
+    reasoning.value += event.payload ?? ''
+  }))
   unlisteners.push(await onEvent<string>('assistant-delta', (event) => {
+    if (event.payload) finishReasoning()
     result.value += event.payload ?? ''
     loading.value = true
     queueRender()
   }))
-  unlisteners.push(await onEvent<null>('assistant-done', () => { loading.value = false; queueRender() }))
-  unlisteners.push(await onEvent<string>('assistant-error', (event) => { loading.value = false; error.value = event.payload }))
+  unlisteners.push(await onEvent<null>('assistant-done', () => { finishReasoning(); loading.value = false; queueRender() }))
+  unlisteners.push(await onEvent<string>('assistant-error', (event) => { finishReasoning(); loading.value = false; error.value = event.payload }))
   unlisteners.push(await onEvent<PublicSettings>('settings-changed', (event) => applyAppearance(event.payload)))
   try {
     session.value = await command<ActionSession>('get_action_session')
@@ -182,6 +228,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('focus', onFocus)
   window.removeEventListener('blur', onBlur)
   if (renderFrame !== undefined) cancelAnimationFrame(renderFrame)
+  if (reasoningFrame !== undefined) cancelAnimationFrame(reasoningFrame)
   window.clearTimeout(footerTimer)
   window.clearTimeout(copyTimer)
 })
@@ -207,7 +254,18 @@ onBeforeUnmount(() => {
     <section ref="scroll" class="content-scroll" @scroll="onScroll">
       <button v-if="session?.action.id !== 'translate'" class="original-toggle" :class="{ open: showOriginal }" type="button" @click="showOriginal = !showOriginal"><span>{{ showOriginal ? '隐藏原文' : '显示原文' }}</span><AppIcon name="chevron" :size="14" /></button>
       <div v-if="showOriginal" class="original"><div>{{ session?.selectedText }}</div><button type="button" title="复制原文" @click="copyText(session?.selectedText ?? '', 'original')"><AppIcon :name="copied === 'original' ? 'check' : 'copy'" :size="13" /></button></div>
-      <div v-if="loading" class="generating"><span class="spinner" /><span>正在生成…</span></div>
+      <div v-if="loading" class="generating"><span class="spinner" /><span>{{ result ? '正在生成回答…' : reasoning ? '正在思考…' : '正在等待模型响应…' }}</span></div>
+      <section v-if="reasoning" class="reasoning-panel" :class="{ expanded: reasoningExpanded, thinking: reasoningActive }">
+        <button class="reasoning-toggle" type="button" :aria-expanded="reasoningExpanded" aria-controls="reasoning-content" @click="reasoningExpanded = !reasoningExpanded">
+          <span class="reasoning-label"><span class="reasoning-indicator" />{{ reasoningActive ? '正在思考' : '思考记录' }}</span>
+          <span class="reasoning-disclosure">{{ reasoningExpanded ? '收起' : '查看思考' }}<AppIcon name="chevron" :size="13" /></span>
+        </button>
+        <div id="reasoning-content" class="reasoning-body" :aria-hidden="!reasoningExpanded" :inert="!reasoningExpanded">
+          <div class="reasoning-clip">
+            <div ref="reasoningScroll" class="reasoning-content" tabindex="0" aria-label="思考内容">{{ reasoning }}</div>
+          </div>
+        </div>
+      </section>
       <article v-if="result" class="result markdown" v-html="renderedResult" @click="openResultLink" />
       <div v-if="error" class="result-error">{{ error }}</div>
       <div class="footer-spacer" />
