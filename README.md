@@ -46,6 +46,8 @@ CitrI 是一个基于 **Tauri 2、Rust 和 Vue 3** 的轻量级跨应用划词�
 
 ### Windows
 
+划词通过 Windows UI Automation 直接读取文本选区，不会模拟 Ctrl+C 或临时修改剪贴板。应用若未公开可访问的文本选区，工具条可能不会出现；不会退回模拟复制。此方式避免向终端发送可能中断命令的 Ctrl+C。macOS 和 Linux 的取词方式不受此适配影响。
+
 准备以下环境：
 
 - Rust MSVC 工具链

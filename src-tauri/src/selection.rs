@@ -17,7 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager, PhysicalPosition};
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(target_os = "windows")]
+#[path = "selection_windows.rs"]
+mod native_selection;
+#[cfg(target_os = "macos")]
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 const DEFAULT_WINDOWS_BLACKLIST: &[&str] = &[
@@ -304,9 +307,7 @@ fn capture_selection(app: tauri::AppHandle, guard: CaptureGuard, points: (f64, f
         return;
     }
 
-    // Only inject one copy shortcut. Repeating it widens the interval in which
-    // a user's own Ctrl/Cmd+C can race with CitrI's temporary modifier state.
-    let text = selected_text(&app, &guard);
+    let text = selected_text(&app, &guard, (points.0, points.1));
     let text = text.trim().chars().take(200_000).collect::<String>();
     if text.is_empty() || guard.generation.load(Ordering::Acquire) != guard.capture_id {
         return;
@@ -338,7 +339,7 @@ fn capture_selection(app: tauri::AppHandle, guard: CaptureGuard, points: (f64, f
 }
 
 #[cfg(target_os = "linux")]
-fn selected_text(_app: &tauri::AppHandle, _guard: &CaptureGuard) -> String {
+fn selected_text(_app: &tauri::AppHandle, _guard: &CaptureGuard, _point: (f64, f64)) -> String {
     let Ok(clipboard) = x11_clipboard::Clipboard::new() else {
         return String::new();
     };
@@ -354,8 +355,18 @@ fn selected_text(_app: &tauri::AppHandle, _guard: &CaptureGuard) -> String {
         .unwrap_or_default()
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-fn selected_text(app: &tauri::AppHandle, guard: &CaptureGuard) -> String {
+#[cfg(target_os = "windows")]
+fn selected_text(_app: &tauri::AppHandle, guard: &CaptureGuard, point: (f64, f64)) -> String {
+    let text = native_selection::read_selection(point).unwrap_or_default();
+    if guard.is_current() {
+        text
+    } else {
+        String::new()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn selected_text(app: &tauri::AppHandle, guard: &CaptureGuard, _point: (f64, f64)) -> String {
     // Captures must not back up or restore each other's temporary clipboard.
     static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
     let Ok(_capture) = CAPTURE_LOCK.try_lock() else {
@@ -382,10 +393,7 @@ fn selected_text(app: &tauri::AppHandle, guard: &CaptureGuard) -> String {
         return String::new();
     }
 
-    #[cfg(target_os = "macos")]
     let modifier = Key::MetaLeft;
-    #[cfg(target_os = "windows")]
-    let modifier = Key::ControlLeft;
     let _ = rdev::simulate(&EventType::KeyPress(modifier));
     let _ = rdev::simulate(&EventType::KeyPress(Key::KeyC));
     let _ = rdev::simulate(&EventType::KeyRelease(Key::KeyC));

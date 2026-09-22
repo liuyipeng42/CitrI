@@ -621,6 +621,7 @@ dependencies = [
  "ts-rs",
  "urlencoding",
  "winapi",
+ "windows 0.61.3",
  "x11-clipboard",
 ]
 
