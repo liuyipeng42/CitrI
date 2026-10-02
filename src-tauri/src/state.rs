@@ -1,4 +1,5 @@
 use crate::{
+    history::HistoryStore,
     models::{ActionWindowSession, SelectionPayload},
     selection::SelectionController,
     settings::SettingsStore,
@@ -20,6 +21,7 @@ pub struct RequestHandle {
 
 pub struct AppState {
     pub settings: SettingsStore,
+    pub history: HistoryStore,
     pub selection: SelectionController,
     sessions: Mutex<HashMap<String, ActionWindowSession>>,
     requests: Mutex<HashMap<String, RequestHandle>>,
@@ -31,10 +33,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(settings: SettingsStore) -> Self {
+    pub fn new(settings: SettingsStore, history: HistoryStore) -> Self {
         let enabled = settings.read(|settings| settings.enabled);
         Self {
             settings,
+            history,
             selection: SelectionController::new(enabled),
             sessions: Mutex::new(HashMap::new()),
             requests: Mutex::new(HashMap::new()),

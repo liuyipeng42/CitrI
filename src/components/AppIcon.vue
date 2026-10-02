@@ -18,6 +18,7 @@ const paths: Record<string, string> = {
   chevron: '<path d="m6 9 6 6 6-6"/>',
   pause: '<rect width="4" height="16" x="6" y="4"/><rect width="4" height="16" x="14" y="4"/>',
   refresh: '<path d="M20 6v6h-6"/><path d="M20 12a8 8 0 1 0-2.3 5.7L20 16"/>',
+  history: '<path d="M3 3v5h5"/><path d="M3 8a9 9 0 1 1-.5 7"/><path d="M12 7v5l3 2"/>',
   circlex: '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
   eye: '<path d="M2.1 12a10.5 10.5 0 0 1 19.8 0 10.5 10.5 0 0 1-19.8 0"/><circle cx="12" cy="12" r="3"/>',
   eyeoff: '<path d="m2 2 20 20"/><path d="M6.7 6.7A10.7 10.7 0 0 0 2.1 12a10.5 10.5 0 0 0 15.2 5.3"/><path d="M10.7 10.7a2 2 0 0 0 2.6 2.6"/><path d="M14.1 5.1A10.5 10.5 0 0 1 21.9 12a10.8 10.8 0 0 1-1.6 2.7"/>',
@@ -32,4 +33,3 @@ const content = computed(() => paths[props.name] ?? paths.sparkles)
 <template>
   <svg :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" v-html="content" />
 </template>
-

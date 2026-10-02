@@ -6,6 +6,7 @@ import { marked } from 'marked'
 import AppIcon from '@/components/AppIcon.vue'
 import { command, errorMessage, onEvent } from '@/lib/bridge'
 import { applyAppearance } from '@/lib/theme'
+import { coalescedTask } from '@/lib/coalescedTask'
 import type { ActionSession, PublicSettings } from '@/types'
 import './action.css'
 
@@ -38,7 +39,7 @@ const resizeDirections = [
 type ResizeDirection = (typeof resizeDirections)[number]
 let footerTimer: number | undefined
 let copyTimer: number | undefined
-let renderFrame: number | undefined
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
 let footerHideAt = 0
 let reasoningFrame: number | undefined
 
@@ -59,8 +60,7 @@ function followReasoning(): void {
     if (!viewport || !reasoningActive.value || !reasoningExpanded.value) return
     const target = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
     const distance = target - viewport.scrollTop
-    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    if (Math.abs(distance) < 1 || reducedMotion) {
+    if (Math.abs(distance) < 1 || reducedMotion.matches) {
       viewport.scrollTop = target
       return
     }
@@ -74,23 +74,20 @@ function followReasoning(): void {
 
 watch([reasoning, reasoningExpanded], followReasoning, { flush: 'post' })
 
-function queueRender(): void {
-  if (renderFrame !== undefined) return
-  renderFrame = requestAnimationFrame(() => {
-    renderFrame = undefined
-    renderedResult.value = DOMPurify.sanitize(marked.parse(result.value, { async: false }) as string, {
-      USE_PROFILES: { html: true },
-      ADD_ATTR: ['target', 'rel'],
-    })
-    void nextTick(() => {
-      if (autoScroll.value && scroll.value) scroll.value.scrollTo({ top: scroll.value.scrollHeight })
-    })
+// Markdown parsing and sanitizing process the entire answer. Limit streaming
+// renders to 20/s; completion flushes the last update without a delay.
+const resultRenderer = coalescedTask(() => {
+  renderedResult.value = DOMPurify.sanitize(marked.parse(result.value, { async: false }) as string, {
+    USE_PROFILES: { html: true },
+    ADD_ATTR: ['target', 'rel'],
   })
-}
+  void nextTick(() => {
+    if (autoScroll.value && scroll.value) scroll.value.scrollTo({ top: scroll.value.scrollHeight })
+  })
+}, 50)
 
 function start(): void {
-  if (renderFrame !== undefined) cancelAnimationFrame(renderFrame)
-  renderFrame = undefined
+  resultRenderer.cancel()
   result.value = ''
   reasoning.value = ''
   reasoningExpanded.value = true
@@ -198,10 +195,10 @@ onMounted(async () => {
     if (event.payload) finishReasoning()
     result.value += event.payload ?? ''
     loading.value = true
-    queueRender()
+    resultRenderer.schedule()
   }))
-  unlisteners.push(await onEvent<null>('assistant-done', () => { finishReasoning(); loading.value = false; queueRender() }))
-  unlisteners.push(await onEvent<string>('assistant-error', (event) => { finishReasoning(); loading.value = false; error.value = event.payload }))
+  unlisteners.push(await onEvent<null>('assistant-done', () => { finishReasoning(); loading.value = false; resultRenderer.flush() }))
+  unlisteners.push(await onEvent<string>('assistant-error', (event) => { finishReasoning(); loading.value = false; error.value = event.payload; resultRenderer.flush() }))
   unlisteners.push(await onEvent<PublicSettings>('settings-changed', (event) => applyAppearance(event.payload)))
   try {
     session.value = await command<ActionSession>('get_action_session')
@@ -227,7 +224,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('focus', onFocus)
   window.removeEventListener('blur', onBlur)
-  if (renderFrame !== undefined) cancelAnimationFrame(renderFrame)
+  resultRenderer.cancel()
   if (reasoningFrame !== undefined) cancelAnimationFrame(reasoningFrame)
   window.clearTimeout(footerTimer)
   window.clearTimeout(copyTimer)

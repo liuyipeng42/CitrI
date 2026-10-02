@@ -1,6 +1,6 @@
 [package]
 name = "citri"
-version = "0.3.1"
+version = "0.3.2"
 description = "A lightweight cross-application selection assistant"
 authors = ["CitrI Contributors"]
 edition = "2024"
@@ -40,3 +40,10 @@ windows = { version = "0.61.3", features = ["Win32_System_Com", "Win32_UI_Access
 
 [dev-dependencies]
 tempfile = "3.23.0"
+
+# Optimize across crates while retaining the default runtime optimization level.
+# Release linking takes longer; development builds are unaffected.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

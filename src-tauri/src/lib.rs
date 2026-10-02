@@ -2,6 +2,7 @@ mod api;
 mod commands;
 mod constants;
 mod events;
+mod history;
 mod models;
 mod selection;
 mod settings;
@@ -22,10 +23,14 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            let path = app.path().data_dir()?.join("citri").join("settings.json");
-            let settings = SettingsStore::load(path);
+            let directory = app.path().data_dir()?.join("citri");
+            let settings = SettingsStore::load(directory.join("settings.json"));
+            let history = history::HistoryStore::load(
+                directory.join("history.json"),
+                settings.read(|settings| settings.history_limit),
+            )?;
             let should_show_settings = settings.active_profile().api_key.is_empty();
-            app.manage(AppState::new(settings));
+            app.manage(AppState::new(settings, history));
             windows::create_toolbar(app.handle())?;
             tray::create(app.handle())?;
             app.state::<AppState>()
@@ -40,6 +45,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             commands::save_settings,
+            commands::get_history,
+            commands::clear_history,
             commands::test_api,
             commands::platform_info,
             commands::toolbar_state,

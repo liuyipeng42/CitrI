@@ -102,6 +102,7 @@ pub struct Settings {
     pub action_window_height: u32,
     pub action_opacity: u8,
     pub font_size: u8,
+    pub history_limit: u32,
     pub accent_color: AccentColor,
     pub custom_accent_color: String,
     pub search_url: String,
@@ -126,6 +127,7 @@ impl Default for Settings {
             action_window_height: ACTION_WINDOW_DEFAULT_HEIGHT,
             action_opacity: 100,
             font_size: 100,
+            history_limit: 100,
             accent_color: AccentColor::Orange,
             custom_accent_color: "#f97316".into(),
             search_url: "https://www.google.com/search?q={{queryString}}".into(),
@@ -189,6 +191,7 @@ impl Settings {
         (self.action_window_width, self.action_window_height) =
             clamp_action_window_size(self.action_window_width, self.action_window_height);
         self.font_size = self.font_size.clamp(85, 125);
+        self.history_limit = self.history_limit.min(1000);
         self.custom_accent_color =
             sanitize_hex(&self.custom_accent_color, &defaults.custom_accent_color);
         self.search_url = non_empty(limited(self.search_url.trim(), 2000), defaults.search_url);
@@ -383,6 +386,33 @@ pub struct ToolbarState {
 pub struct PlatformInfo {
     pub platform: String,
     pub display_protocol: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum HistoryStatus {
+    Success,
+    Error,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct HistoryEntry {
+    #[ts(type = "number")]
+    pub id: u64,
+    #[ts(type = "number")]
+    pub created_at: u64,
+    pub action_name: String,
+    pub model: String,
+    pub selected_text: String,
+    pub prompt: String,
+    pub system_prompt: String,
+    pub result: String,
+    pub status: HistoryStatus,
+    pub error: Option<String>,
 }
 
 pub fn default_actions() -> Vec<ActionItem> {
@@ -583,6 +613,30 @@ mod tests {
         assert_eq!(value.accent_color, AccentColor::Orange);
         assert_eq!(value.filter_mode, FilterMode::Default);
         assert_eq!(value.active_profile().api_url, "https://example.com/v1");
+    }
+
+    #[test]
+    fn history_limit_defaults_for_older_settings_and_has_a_safe_range() {
+        let legacy: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.history_limit, 100);
+        assert_eq!(
+            Settings {
+                history_limit: u32::MAX,
+                ..legacy.clone()
+            }
+            .sanitized()
+            .history_limit,
+            1000
+        );
+        assert_eq!(
+            Settings {
+                history_limit: 0,
+                ..legacy
+            }
+            .sanitized()
+            .history_limit,
+            0
+        );
     }
 
     #[test]

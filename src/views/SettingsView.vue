@@ -10,16 +10,18 @@ import ApiSettings from '@/views/settings/ApiSettings.vue'
 import AppearanceSettings from '@/views/settings/AppearanceSettings.vue'
 import FiltersSettings from '@/views/settings/FiltersSettings.vue'
 import GeneralSettings from '@/views/settings/GeneralSettings.vue'
+import HistorySettings from '@/views/settings/HistorySettings.vue'
 import logoUrl from '@/assets/logo.png'
 import './settings.css'
 
-type Page = 'general' | 'api' | 'actions' | 'appearance' | 'filters'
+type Page = 'general' | 'api' | 'actions' | 'appearance' | 'history' | 'filters'
 
 const pages: Array<{ id: Page; icon: string; title: string; description: string }> = [
   { id: 'general', icon: 'sparkles', title: '基础设置', description: '开启 CitrI 并预览工具条' },
   { id: 'api', icon: 'message-circle-question', title: 'API 与模型', description: '连接 OpenAI Chat Completions 兼容接口' },
   { id: 'actions', icon: 'align-left', title: '动作与 Prompt', description: '管理工具条动作、顺序与提示词' },
   { id: 'appearance', icon: 'droplet', title: '界面与窗口', description: '调整工具条和结果窗口的外观与行为' },
+  { id: 'history', icon: 'history', title: '历史记录', description: '查看最近的 AI 请求内容与处理结果' },
   { id: 'filters', icon: 'search', title: '应用过滤', description: '控制在哪些应用中响应划词' },
 ]
 const settings = ref<Settings | null>(null)
@@ -154,12 +156,12 @@ onBeforeUnmount(() => {
     </aside>
 
     <section class="settings-content">
-      <header class="page-header">
-        <div><h1>{{ currentPage.title }}</h1><p>{{ currentPage.description }}</p></div>
+      <header class="page-header" :class="{ 'history-page-header': page === 'history' }">
+        <div><h1>{{ currentPage.title }}</h1><p v-if="page !== 'history'">{{ currentPage.description }}</p></div>
         <div class="header-actions"><span class="save-status" :class="statusKind">{{ status }}</span></div>
       </header>
 
-      <main v-if="settings" class="settings-column" @input="noteDraftEdit" @change="handleControlChange" @focusout="handleControlFocusOut" @click="handleControlClick">
+      <main v-if="settings" class="settings-column" :class="{ 'history-page': page === 'history' }" @input="noteDraftEdit" @change="handleControlChange" @focusout="handleControlFocusOut" @click="handleControlClick">
         <div v-if="serviceError" class="notice error-notice">{{ serviceError }}</div>
         <div v-if="platformNotice" class="notice warning-notice">{{ platformNotice }}</div>
 
@@ -169,6 +171,7 @@ onBeforeUnmount(() => {
 
         <ActionsSettings v-show="page === 'actions'" v-model="settings" />
         <AppearanceSettings v-show="page === 'appearance'" v-model="settings" />
+        <HistorySettings v-if="page === 'history'" v-model="settings" />
         <FiltersSettings v-show="page === 'filters'" v-model:settings="settings" v-model:filter-list="filterListText" />
       </main>
 

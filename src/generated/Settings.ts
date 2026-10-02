@@ -4,4 +4,4 @@ import type { ActionItem } from "./ActionItem.js";
 import type { ApiProfile } from "./ApiProfile.js";
 import type { FilterMode } from "./FilterMode.js";
 
-export type Settings = { enabled: boolean, apiProfiles: Array<ApiProfile>, activeApiProfileId: string, compact: boolean, followToolbar: boolean, autoClose: boolean, autoPin: boolean, rememberActionWindowSize: boolean, actionWindowWidth: number, actionWindowHeight: number, actionOpacity: number, fontSize: number, accentColor: AccentColor, customAccentColor: string, searchUrl: string, filterMode: FilterMode, filterList: Array<string>, actions: Array<ActionItem>, };
+export type Settings = { enabled: boolean, apiProfiles: Array<ApiProfile>, activeApiProfileId: string, compact: boolean, followToolbar: boolean, autoClose: boolean, autoPin: boolean, rememberActionWindowSize: boolean, actionWindowWidth: number, actionWindowHeight: number, actionOpacity: number, fontSize: number, historyLimit: number, accentColor: AccentColor, customAccentColor: string, searchUrl: string, filterMode: FilterMode, filterList: Array<string>, actions: Array<ActionItem>, };
