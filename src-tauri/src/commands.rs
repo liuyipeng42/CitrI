@@ -1,20 +1,20 @@
 use crate::{
-    api::{compose_prompt, stream_chat_completion},
+    api::{compose_prompt, response_system_prompt, stream_chat_completion},
     models::{
-        ActionSession, ApiProfile, HistoryEntry, HistoryStatus, PlatformInfo, Settings,
-        ToolbarState,
+        ActionSession, ApiProfile, HistoryEntry, HistoryPage, HistoryStatus, PlatformInfo,
+        Settings, ToolbarState,
     },
     selection::hide_toolbar,
     state::{AppState, RequestHandle},
     ui, windows,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, WebviewWindow};
+use tauri::{Emitter, Manager, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_runtime::ResizeDirection;
 use tokio_util::sync::CancellationToken;
 
-fn require_window(window: &WebviewWindow, expected: &str) -> Result<(), String> {
+pub(crate) fn require_window(window: &WebviewWindow, expected: &str) -> Result<(), String> {
     let valid = if expected == "action" {
         window.label().starts_with("action-")
     } else {
@@ -42,7 +42,9 @@ pub async fn save_settings(
     settings: Settings,
 ) -> Result<Settings, String> {
     require_window(&window, "settings")?;
+    let _data_guard = state.lock_data()?;
     let settings = state.settings.save(settings)?;
+    state.sync.note_settings(&settings)?;
     state.selection.set_enabled(settings.enabled);
     if !settings.enabled {
         hide_toolbar(&app);
@@ -51,30 +53,60 @@ pub async fn save_settings(
         let _ = item.set_checked(settings.enabled);
     }
     ui::broadcast_settings(&app, &settings);
+    let history_revision = state.history.revision();
     state.history.set_limit(settings.history_limit)?;
-    let _ = app.emit_to("settings", "history-changed", ());
+    if state.history.revision() != history_revision {
+        let _ = app.emit_to("settings", "history-changed", ());
+    }
     Ok(settings)
 }
 
 #[tauri::command]
-pub fn get_history(
+pub async fn list_history(
     window: WebviewWindow,
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<HistoryEntry>, String> {
+    app: tauri::AppHandle,
+    query: String,
+    offset: usize,
+    limit: usize,
+) -> Result<HistoryPage, String> {
     require_window(&window, "settings")?;
-    state.history.get()
+    if query.len() > 8000 {
+        return Err("搜索内容过长".into());
+    }
+    let ticket = app.state::<AppState>().history.next_query();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>()
+            .history
+            .page_at(&query, offset, limit, ticket)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn clear_history(
+pub async fn get_history_entry(
     window: WebviewWindow,
     app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+    id: u64,
+) -> Result<Option<HistoryEntry>, String> {
     require_window(&window, "settings")?;
-    state.history.clear()?;
-    let _ = app.emit_to("settings", "history-changed", ());
-    Ok(())
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().history.entry(id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn clear_history(window: WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+    require_window(&window, "settings")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _data_guard = state.lock_data()?;
+        state.history.clear()?;
+        let _ = app.emit_to("settings", "history-changed", ());
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -88,8 +120,11 @@ pub async fn test_api(window: WebviewWindow, profile: ApiProfile) -> Result<Stri
     .sanitized()
     .active_profile();
     let cancellation = CancellationToken::new();
-    let result = stream_chat_completion(&profile, "请只回复 OK", &cancellation, |_| {}).await?;
-    Ok(result.trim().into())
+    let result = stream_chat_completion(&profile, "请只回复 OK", &cancellation, |_| {}).await;
+    match result.error {
+        Some(error) => Err(error),
+        None => Ok(result.content.trim().into()),
+    }
 }
 
 #[tauri::command]
@@ -222,7 +257,6 @@ pub async fn assistant_start(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let mut partial_result = String::new();
     let request_id = state.next_request_id();
     let cancellation = CancellationToken::new();
     if let Some(previous) = state.replace_request(
@@ -235,7 +269,6 @@ pub async fn assistant_start(
         previous.cancellation.cancel();
     }
     let result = stream_chat_completion(&profile, &prompt, &cancellation, |delta| {
-        partial_result.push_str(&delta.content);
         if state.request_is_current(&label, request_id) {
             if !delta.reasoning.is_empty() {
                 let _ = window.emit("assistant-reasoning", delta.reasoning);
@@ -249,26 +282,35 @@ pub async fn assistant_start(
     // Stopped, replaced and closed windows still retain their partial response.
     // Only the active request may emit completion events to its result window.
     if let Some(ticket) = history_ticket {
-        let (status, error, content) = match &result {
-            Ok(content) => (HistoryStatus::Success, None, content.clone()),
-            Err(error) if error == "__CANCELLED__" => {
-                (HistoryStatus::Cancelled, None, partial_result)
-            }
-            Err(error) => (HistoryStatus::Error, Some(error.clone()), partial_result),
+        let status = match result.error.as_deref() {
+            None => HistoryStatus::Success,
+            Some("__CANCELLED__") => HistoryStatus::Cancelled,
+            Some(_) => HistoryStatus::Error,
         };
+        let system_prompt = response_system_prompt(&profile);
         let entry = HistoryEntry {
+            sync_id: uuid::Uuid::new_v4().to_string(),
+            revived_at: 0,
             id: ticket.id,
             created_at,
             action_name: session.action.name,
             model: profile.model,
             selected_text: session.selected_text,
             prompt,
-            system_prompt: profile.system_prompt.trim().to_string(),
-            result: content,
+            system_prompt,
+            result: result.content,
             status,
-            error,
+            error: if status == HistoryStatus::Error {
+                result.error.clone()
+            } else {
+                None
+            },
         };
-        match state.history.append(ticket, entry) {
+        let save_history = || {
+            let _data_guard = state.lock_data()?;
+            state.history.append(ticket, entry)
+        };
+        match save_history() {
             Ok(true) => {
                 let _ = app.emit_to("settings", "history-changed", ());
             }
@@ -281,9 +323,9 @@ pub async fn assistant_start(
     if !state.finish_request(&label, request_id) {
         return Ok(());
     }
-    if matches!(&result, Err(error) if error == "__CANCELLED__") {
+    if result.error.as_deref() == Some("__CANCELLED__") {
         let _ = window.emit("assistant-done", ());
-    } else if let Err(error) = result {
+    } else if let Some(error) = result.error {
         let _ = window.emit("assistant-error", error);
     } else {
         let _ = window.emit("assistant-done", ());

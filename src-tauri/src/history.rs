@@ -1,149 +1,69 @@
 use crate::models::HistoryEntry;
-use atomic_write_file::AtomicWriteFile;
-use std::{fs, io::Write, path::PathBuf, sync::Mutex};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-pub struct HistoryStore {
-    path: PathBuf,
-    value: Mutex<HistoryState>,
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorySnapshot {
+    pub entries: Vec<HistoryEntry>,
+    pub cleared_at: u64,
 }
 
-struct HistoryState {
-    entries: Vec<HistoryEntry>,
-    limit: usize,
-    next_id: u64,
-    generation: u64,
-    load_error: Option<String>,
+pub fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
-pub struct HistoryTicket {
-    pub id: u64,
-    generation: u64,
+pub fn merge_history(
+    local: &HistorySnapshot,
+    remote: &HistorySnapshot,
+    limit: u32,
+) -> HistorySnapshot {
+    let cleared_at = local.cleared_at.max(remote.cleared_at);
+    let mut entries: HashMap<&str, &HistoryEntry> = HashMap::new();
+    for entry in local.entries.iter().chain(&remote.entries) {
+        if entry.created_at <= cleared_at && entry.revived_at <= cleared_at {
+            continue;
+        }
+        entries
+            .entry(&entry.sync_id)
+            .and_modify(|existing| {
+                if entry.revived_at > existing.revived_at {
+                    *existing = entry;
+                }
+            })
+            .or_insert(entry);
+    }
+    let mut entries: Vec<_> = entries.into_values().collect();
+    entries.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.sync_id.cmp(&a.sync_id))
+    });
+    entries.truncate(limit.min(1000) as usize);
+    HistorySnapshot {
+        entries: entries.into_iter().cloned().collect(),
+        cleared_at,
+    }
 }
 
-impl HistoryStore {
-    pub fn load(path: PathBuf, limit: u32) -> Result<Self, String> {
-        let loaded: Result<Vec<HistoryEntry>, String> = match fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents)
-                .map_err(|error| format!("无法读取历史记录：{error}")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(format!("无法读取历史记录：{error}")),
-        };
-        // A damaged history file must not prevent the assistant from starting.
-        // Preserve the file and suspend recording until the user clears it.
-        let (mut entries, load_error) = match loaded {
-            Ok(entries) => (entries, None),
-            Err(error) => (Vec::new(), Some(error)),
-        };
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.id));
-        let next_id = entries.first().map_or(1, |entry| entry.id + 1);
-        let limit = limit.min(1000) as usize;
-        let needs_trim = entries.len() > limit;
-        entries.truncate(limit);
-        let store = Self {
-            path,
-            value: Mutex::new(HistoryState {
-                entries,
-                limit,
-                next_id,
-                generation: 0,
-                load_error,
-            }),
-        };
-        if needs_trim {
-            store.persist(&store.value.lock().unwrap().entries)?;
-        }
-        Ok(store)
-    }
-
-    pub fn get(&self) -> Result<Vec<HistoryEntry>, String> {
-        let value = self.value.lock().map_err(|_| "历史记录存储已损坏")?;
-        if let Some(error) = &value.load_error {
-            return Err(error.clone());
-        }
-        Ok(value.entries.clone())
-    }
-
-    pub fn begin(&self) -> Option<HistoryTicket> {
-        let mut value = self.value.lock().ok()?;
-        if value.limit == 0 || value.load_error.is_some() {
-            return None;
-        }
-        let ticket = HistoryTicket {
-            id: value.next_id,
-            generation: value.generation,
-        };
-        value.next_id += 1;
-        Some(ticket)
-    }
-
-    pub fn append(&self, ticket: HistoryTicket, mut entry: HistoryEntry) -> Result<bool, String> {
-        let mut value = self.value.lock().map_err(|_| "历史记录存储已损坏")?;
-        // Clearing or disabling history also discards requests still in flight.
-        if ticket.generation != value.generation || value.limit == 0 {
-            return Ok(false);
-        }
-        entry.id = ticket.id;
-        let mut entries = value.entries.clone();
-        entries.push(entry);
-        // Concurrent requests can finish in a different order from their start.
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.id));
-        entries.truncate(value.limit);
-        self.persist(&entries)?;
-        value.entries = entries;
-        Ok(true)
-    }
-
-    pub fn set_limit(&self, limit: u32) -> Result<(), String> {
-        let mut value = self.value.lock().map_err(|_| "历史记录存储已损坏")?;
-        let limit = limit.min(1000) as usize;
-        if value.entries.len() > limit {
-            let entries = value.entries[..limit].to_vec();
-            self.persist(&entries)?;
-            value.entries = entries;
-        }
-        if limit == 0 {
-            value.generation += 1;
-        }
-        value.limit = limit;
-        Ok(())
-    }
-
-    pub fn clear(&self) -> Result<(), String> {
-        let mut value = self.value.lock().map_err(|_| "历史记录存储已损坏")?;
-        self.persist(&[])?;
-        value.entries.clear();
-        value.generation += 1;
-        value.load_error = None;
-        Ok(())
-    }
-
-    fn persist(&self, entries: &[HistoryEntry]) -> Result<(), String> {
-        let write = || -> Result<(), Box<dyn std::error::Error>> {
-            if let Some(parent) = self.path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut file = AtomicWriteFile::open(&self.path)?;
-            file.write_all(&serde_json::to_vec_pretty(entries)?)?;
-            file.write_all(b"\n")?;
-            file.commit()?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
-            }
-            Ok(())
-        };
-        write().map_err(|error| format!("无法保存历史记录：{error}"))
-    }
-}
+pub use crate::history_store::HistoryStore;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::HistoryStatus;
+    use std::{fs, time::Instant};
 
     fn entry(status: HistoryStatus) -> HistoryEntry {
         HistoryEntry {
+            sync_id: uuid::Uuid::new_v4().to_string(),
+            revived_at: 0,
             id: 0,
             created_at: 123,
             action_name: "翻译".into(),
@@ -158,9 +78,45 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "synthetic storage benchmark; run explicitly"]
+    fn benchmark_append() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.db");
+        let store = HistoryStore::load(path.clone(), 1000).unwrap();
+        let entries = (0..1000)
+            .map(|index| {
+                let mut entry = entry(HistoryStatus::Success);
+                entry.created_at = index + 1;
+                entry.result = "x".repeat(5000);
+                entry
+            })
+            .collect();
+        store
+            .replace(
+                HistorySnapshot {
+                    entries,
+                    cleared_at: 0,
+                },
+                1000,
+            )
+            .unwrap();
+        let started = Instant::now();
+        for index in 0..50 {
+            let mut entry = entry(HistoryStatus::Success);
+            entry.created_at = index + 1001;
+            entry.result = "x".repeat(5000);
+            store.append(store.begin().unwrap(), entry).unwrap();
+        }
+        println!(
+            "1000 records, 5 KB result, 50 appends: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn retains_newest_requests_when_they_finish_out_of_order_and_survive_restart() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("history.json");
+        let path = directory.path().join("history.db");
         let store = HistoryStore::load(path.clone(), 2).unwrap();
         let first = store.begin().unwrap();
         let second = store.begin().unwrap();
@@ -183,7 +139,7 @@ mod tests {
     #[test]
     fn shrinking_and_disabling_are_persisted_and_invalidate_pending_requests() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("history.json");
+        let path = directory.path().join("history.db");
         let store = HistoryStore::load(path.clone(), 3).unwrap();
         for _ in 0..3 {
             store
@@ -220,7 +176,7 @@ mod tests {
     #[test]
     fn clearing_does_not_allow_pending_requests_to_restore_old_history() {
         let directory = tempfile::tempdir().unwrap();
-        let store = HistoryStore::load(directory.path().join("history.json"), 10).unwrap();
+        let store = HistoryStore::load(directory.path().join("history.db"), 10).unwrap();
         let pending = store.begin().unwrap();
         store.clear().unwrap();
         assert!(
@@ -237,13 +193,12 @@ mod tests {
     #[test]
     fn failed_write_preserves_current_records() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("history.json");
+        let path = directory.path().join("history.db");
         let store = HistoryStore::load(path.clone(), 10).unwrap();
         store
             .append(store.begin().unwrap(), entry(HistoryStatus::Success))
             .unwrap();
-        fs::remove_file(&path).unwrap();
-        fs::create_dir(&path).unwrap();
+        store.make_read_only();
         assert!(store.clear().is_err());
         assert!(
             store
@@ -256,7 +211,7 @@ mod tests {
     #[test]
     fn startup_enforces_reduced_limit_on_disk() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("history.json");
+        let path = directory.path().join("history.db");
         let store = HistoryStore::load(path.clone(), 3).unwrap();
         for _ in 0..3 {
             store
@@ -274,7 +229,7 @@ mod tests {
     #[test]
     fn damaged_history_is_preserved_and_can_be_reset_without_blocking_startup() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("history.json");
+        let path = directory.path().join("history.db");
         fs::write(&path, "damaged data").unwrap();
         let store = HistoryStore::load(path.clone(), 100).unwrap();
         assert!(store.get().is_err());
@@ -283,5 +238,36 @@ mod tests {
         store.clear().unwrap();
         assert!(store.get().unwrap().is_empty());
         assert!(store.begin().is_some());
+    }
+
+    #[test]
+    fn sqlite_pages_search_unicode_and_load_only_selected_details() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = HistoryStore::load(directory.path().join("history.db"), 100).unwrap();
+        for index in 0..95 {
+            let mut row = entry(HistoryStatus::Success);
+            row.created_at = index + 1;
+            row.selected_text = "ÜBERINPUT 原文".into();
+            row.result = "中文回答 \"quoted\" %_".repeat(300);
+            store.append(store.begin().unwrap(), row).unwrap();
+        }
+        let page = store.page("überinput 中文回答", 0, 50).unwrap();
+        assert_eq!(page.total, 95);
+        assert_eq!(page.filtered_total, 95);
+        assert_eq!(page.entries.len(), 50);
+        assert_eq!(page.entries[0].id, 95);
+        assert_eq!(store.page("", 50, 50).unwrap().entries.len(), 45);
+        assert_eq!(store.page("%_", 0, 50).unwrap().filtered_total, 95);
+        assert_eq!(store.page("\"quoted\"", 0, 50).unwrap().filtered_total, 95);
+        assert_eq!(store.page("不存在", 0, 50).unwrap().filtered_total, 0);
+        let stale_ticket = store.next_query();
+        let current_ticket = store.next_query();
+        assert!(store.page_at("", 0, 50, stale_ticket).is_err());
+        assert_eq!(store.page_at("", 0, 50, current_ticket).unwrap().total, 95);
+        assert!(store.entry(95).unwrap().unwrap().result.len() > 5000);
+        assert!(serde_json::to_vec(&page).unwrap().len() < 20_000);
+        let revision = store.revision();
+        store.replace(store.snapshot().unwrap(), 100).unwrap();
+        assert_eq!(store.revision(), revision);
     }
 }

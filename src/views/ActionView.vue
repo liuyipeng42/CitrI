@@ -1,16 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { UnlistenFn } from '@tauri-apps/api/event'
-import DOMPurify from 'dompurify'
-import { marked } from 'marked'
+import { renderMarkdown } from '@/lib/markdown'
 import AppIcon from '@/components/AppIcon.vue'
 import { command, errorMessage, onEvent } from '@/lib/bridge'
 import { applyAppearance } from '@/lib/theme'
 import { coalescedTask } from '@/lib/coalescedTask'
 import type { ActionSession, PublicSettings } from '@/types'
 import './action.css'
-
-marked.setOptions({ gfm: true, breaks: true })
 
 const session = ref<ActionSession | null>(null)
 const result = ref('')
@@ -20,6 +17,8 @@ const reasoningFinished = ref(false)
 const reasoningScroll = ref<HTMLElement | null>(null)
 const reasoningActive = computed(() => loading.value && !reasoningFinished.value)
 const renderedResult = ref('')
+let pendingResult = ''
+let pendingReasoning = ''
 const error = ref('')
 const loading = ref(true)
 const pinned = ref(false)
@@ -77,10 +76,11 @@ watch([reasoning, reasoningExpanded], followReasoning, { flush: 'post' })
 // Markdown parsing and sanitizing process the entire answer. Limit streaming
 // renders to 20/s; completion flushes the last update without a delay.
 const resultRenderer = coalescedTask(() => {
-  renderedResult.value = DOMPurify.sanitize(marked.parse(result.value, { async: false }) as string, {
-    USE_PROFILES: { html: true },
-    ADD_ATTR: ['target', 'rel'],
-  })
+  if (pendingReasoning) { reasoning.value += pendingReasoning; pendingReasoning = '' }
+  if (!pendingResult) return
+  result.value += pendingResult
+  pendingResult = ''
+  renderedResult.value = renderMarkdown(result.value)
   void nextTick(() => {
     if (autoScroll.value && scroll.value) scroll.value.scrollTo({ top: scroll.value.scrollHeight })
   })
@@ -88,6 +88,8 @@ const resultRenderer = coalescedTask(() => {
 
 function start(): void {
   resultRenderer.cancel()
+  pendingResult = ''
+  pendingReasoning = ''
   result.value = ''
   reasoning.value = ''
   reasoningExpanded.value = true
@@ -189,11 +191,12 @@ function onBlur(): void {
 
 onMounted(async () => {
   unlisteners.push(await onEvent<string>('assistant-reasoning', (event) => {
-    reasoning.value += event.payload ?? ''
+    pendingReasoning += event.payload ?? ''
+    resultRenderer.schedule()
   }))
   unlisteners.push(await onEvent<string>('assistant-delta', (event) => {
     if (event.payload) finishReasoning()
-    result.value += event.payload ?? ''
+    pendingResult += event.payload ?? ''
     loading.value = true
     resultRenderer.schedule()
   }))

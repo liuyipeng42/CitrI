@@ -187,17 +187,17 @@ impl SelectionController {
                 let result = listen(move |event| {
                     let _ = sender.send(event);
                 });
-                if let Err(error) = result {
-                    if !reported_error {
-                        let message = format!("划词监听器启动失败：{error:?}");
-                        eprintln!("[selection] {message}");
-                        let event_app = app.clone();
-                        let dispatcher = app.clone();
-                        let _ = dispatcher.run_on_main_thread(move || {
-                            let _ = event_app.emit_to("settings", "selection-error", message);
-                        });
-                        reported_error = true;
-                    }
+                if let Err(error) = result
+                    && !reported_error
+                {
+                    let message = format!("划词监听器启动失败：{error:?}");
+                    eprintln!("[selection] {message}");
+                    let event_app = app.clone();
+                    let dispatcher = app.clone();
+                    let _ = dispatcher.run_on_main_thread(move || {
+                        let _ = event_app.emit_to("settings", "selection-error", message);
+                    });
+                    reported_error = true;
                 }
                 // `rdev::listen` normally runs indefinitely, but may return if
                 // the OS message loop ends or hook installation temporarily fails.

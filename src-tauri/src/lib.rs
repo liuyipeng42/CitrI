@@ -1,8 +1,11 @@
 mod api;
 mod commands;
 mod constants;
+mod data;
+mod data_commands;
 mod events;
 mod history;
+mod history_store;
 mod models;
 mod selection;
 mod settings;
@@ -22,15 +25,17 @@ pub fn run() {
             ui::show_settings(app)
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let directory = app.path().data_dir()?.join("citri");
             let settings = SettingsStore::load(directory.join("settings.json"));
             let history = history::HistoryStore::load(
-                directory.join("history.json"),
+                directory.join("history.db"),
                 settings.read(|settings| settings.history_limit),
             )?;
             let should_show_settings = settings.active_profile().api_key.is_empty();
             app.manage(AppState::new(settings, history));
+            data_commands::start_auto_sync(app.handle().clone());
             windows::create_toolbar(app.handle())?;
             tray::create(app.handle())?;
             app.state::<AppState>()
@@ -45,8 +50,17 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             commands::save_settings,
-            commands::get_history,
+            commands::list_history,
+            commands::get_history_entry,
             commands::clear_history,
+            data_commands::get_data_info,
+            data_commands::save_sync_preferences,
+            data_commands::set_sync_editing,
+            data_commands::export_data,
+            data_commands::import_data,
+            data_commands::test_webdav,
+            data_commands::sync_webdav,
+            data_commands::open_data_directory,
             commands::test_api,
             commands::platform_info,
             commands::toolbar_state,

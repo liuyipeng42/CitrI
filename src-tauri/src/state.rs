@@ -1,4 +1,5 @@
 use crate::{
+    data::SyncStore,
     history::HistoryStore,
     models::{ActionWindowSession, SelectionPayload},
     selection::SelectionController,
@@ -22,6 +23,9 @@ pub struct RequestHandle {
 pub struct AppState {
     pub settings: SettingsStore,
     pub history: HistoryStore,
+    pub sync: SyncStore,
+    pub sync_editing: AtomicBool,
+    data_gate: Mutex<()>,
     pub selection: SelectionController,
     sessions: Mutex<HashMap<String, ActionWindowSession>>,
     requests: Mutex<HashMap<String, RequestHandle>>,
@@ -35,9 +39,17 @@ pub struct AppState {
 impl AppState {
     pub fn new(settings: SettingsStore, history: HistoryStore) -> Self {
         let enabled = settings.read(|settings| settings.enabled);
+        let sync = SyncStore::load(
+            settings.directory().join("sync.json"),
+            &settings.get(),
+            settings.modified_at(),
+        );
         Self {
             settings,
             history,
+            sync,
+            sync_editing: AtomicBool::new(false),
+            data_gate: Mutex::new(()),
             selection: SelectionController::new(enabled),
             sessions: Mutex::new(HashMap::new()),
             requests: Mutex::new(HashMap::new()),
@@ -47,6 +59,12 @@ impl AppState {
             next_request_id: AtomicU64::new(1),
             quitting: AtomicBool::new(false),
         }
+    }
+
+    pub fn lock_data(&self) -> Result<MutexGuard<'_, ()>, String> {
+        self.data_gate
+            .lock()
+            .map_err(|_| "数据存储已损坏".to_string())
     }
 
     pub fn insert_session(&self, label: String, session: ActionWindowSession) {

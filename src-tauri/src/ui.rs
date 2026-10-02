@@ -18,9 +18,13 @@ pub fn show_settings(app: &tauri::AppHandle) {
 
 pub fn set_enabled(app: &tauri::AppHandle, enabled: bool) {
     let state = app.state::<AppState>();
+    let Ok(_data_guard) = state.lock_data() else {
+        return;
+    };
     let mut settings = state.settings.get();
     settings.enabled = enabled;
     if let Ok(settings) = state.settings.save(settings) {
+        let _ = state.sync.note_settings(&settings);
         state.selection.set_enabled(enabled);
         if !enabled {
             crate::selection::hide_toolbar(app);

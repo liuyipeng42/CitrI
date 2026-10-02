@@ -1,84 +1,111 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import type { UnlistenFn } from '@tauri-apps/api/event'
-import DOMPurify from 'dompurify'
-import { marked } from 'marked'
+import { renderMarkdown } from '@/lib/markdown'
 import AppIcon from '@/components/AppIcon.vue'
 import { command, errorMessage, onEvent } from '@/lib/bridge'
-import type { HistoryEntry, HistoryStatus, Settings } from '@/types'
+import { coalescedTask } from '@/lib/coalescedTask'
+import type { HistoryEntry, HistoryPage, HistoryStatus, HistorySummary, Settings } from '@/types'
 
 const settings = defineModel<Settings>({ required: true })
-const entries = ref<HistoryEntry[]>([])
+const entries = shallowRef<HistorySummary[]>([])
+const selected = shallowRef<HistoryEntry | null>(null)
 const query = ref('')
-const selectedId = ref<number | null>(null)
+const total = ref(0)
+const filteredTotal = ref(0)
 const loading = ref(true)
+const loadingMore = ref(false)
+const refreshing = ref(false)
+const searching = ref(false)
 const clearing = ref(false)
 const confirmingClear = ref(false)
 const error = ref('')
 const unlisteners: UnlistenFn[] = []
 let disposed = false
 let revision = 0
-
-const searchIndex = computed(() => entries.value.map((entry) => ({
-  entry,
-  text: [entry.actionName, entry.model, entry.selectedText, entry.prompt, entry.systemPrompt, entry.result, entry.error ?? ''].join('\n').toLowerCase(),
-})))
-const searchTerms = computed(() => query.value.trim().toLowerCase().split(/\s+/).filter(Boolean))
-const filteredEntries = computed(() => searchTerms.value.length
-  ? searchIndex.value.filter(({ text }) => searchTerms.value.every((term) => text.includes(term))).map(({ entry }) => entry)
-  : entries.value)
-const selected = computed(() => filteredEntries.value.find((entry) => entry.id === selectedId.value) ?? filteredEntries.value[0])
-const renderedResult = computed(() => DOMPurify.sanitize(marked.parse(selected.value?.result ?? '', { async: false }) as string, {
-  USE_PROFILES: { html: true },
-}))
+let detailRevision = 0
+let searchTimer: number | undefined
+const pageSize = 50
+const renderedResult = computed(() => renderMarkdown(selected.value?.result ?? ''))
 const statusNames: Record<HistoryStatus, string> = { success: '已完成', error: '失败', cancelled: '已停止' }
 
-function formatDate(timestamp: number): string {
-  return new Date(timestamp).toLocaleString('zh-CN', { hour12: false })
-}
-
+function formatDate(timestamp: number): string { return new Date(timestamp).toLocaleString('zh-CN', { hour12: false }) }
 function updateLimit(event: Event): void {
   const input = event.target as HTMLInputElement
-  const parsed = Number(input.value)
-  const limit = input.value.trim() && Number.isFinite(parsed)
-    ? Math.min(1000, Math.max(0, Math.trunc(parsed)))
-    : settings.value.historyLimit
+  const value = Number(input.value)
+  const limit = input.value.trim() && Number.isFinite(value) ? Math.min(1000, Math.max(0, Math.trunc(value))) : settings.value.historyLimit
   settings.value.historyLimit = limit
   input.value = String(limit)
 }
 
-async function refresh(): Promise<void> {
-  const current = ++revision
+async function selectEntry(id: number): Promise<void> {
+  if (selected.value?.id === id) return
+  const current = ++detailRevision
   try {
-    const records = await command<HistoryEntry[]>('get_history')
-    if (disposed || current !== revision) return
-    entries.value = records
-    if (!records.some((entry) => entry.id === selectedId.value)) selectedId.value = records[0]?.id ?? null
-    error.value = ''
-  } catch (reason) {
-    if (!disposed && current === revision) error.value = errorMessage(reason)
-  } finally {
-    if (!disposed && current === revision) loading.value = false
-  }
+    const entry = await command<HistoryEntry | null>('get_history_entry', { id })
+    if (!disposed && current === detailRevision) selected.value = entry
+  } catch (reason) { if (!disposed && current === detailRevision) error.value = errorMessage(reason) }
 }
+
+async function refresh(): Promise<void> {
+  window.clearTimeout(searchTimer)
+  const current = ++revision
+  detailRevision += 1
+  refreshing.value = true
+  loadingMore.value = false
+  try {
+    const page = await command<HistoryPage>('list_history', { query: query.value, offset: 0, limit: pageSize })
+    if (disposed || current !== revision) return
+    entries.value = page.entries
+    total.value = page.total
+    filteredTotal.value = page.filteredTotal
+    error.value = ''
+    if (!page.entries.length) { detailRevision += 1; selected.value = null }
+    else if (!page.entries.some((entry) => entry.id === selected.value?.id)) await selectEntry(page.entries[0]!.id)
+  } catch (reason) { if (!disposed && current === revision) error.value = errorMessage(reason) }
+  finally { if (!disposed && current === revision) { loading.value = false; searching.value = false; refreshing.value = false } }
+}
+
+async function loadMore(): Promise<void> {
+  if (loadingMore.value || searching.value || refreshing.value || entries.value.length >= filteredTotal.value) return
+  const current = revision
+  loadingMore.value = true
+  try {
+    const page = await command<HistoryPage>('list_history', { query: query.value, offset: entries.value.length, limit: pageSize })
+    if (disposed || current !== revision) return
+    const existing = new Set(entries.value.map((entry) => entry.id))
+    entries.value = [...entries.value, ...page.entries.filter((entry) => !existing.has(entry.id))]
+    total.value = page.total
+    filteredTotal.value = page.filteredTotal
+  } catch (reason) { if (!disposed && current === revision) error.value = errorMessage(reason) }
+  finally { if (!disposed && current === revision) loadingMore.value = false }
+}
+
+function scrollList(event: Event): void {
+  const list = event.target as HTMLElement
+  if (list.scrollHeight - list.scrollTop - list.clientHeight < 100) void loadMore()
+}
+
+watch(query, () => {
+  window.clearTimeout(searchTimer)
+  revision += 1
+  detailRevision += 1
+  searching.value = true
+  searchTimer = window.setTimeout(() => { void refresh() }, 200)
+})
+const reload = coalescedTask(() => { void refresh() }, 80)
 
 async function clear(): Promise<void> {
   clearing.value = true
-  try {
-    await command('clear_history')
-    confirmingClear.value = false
-    await refresh()
-  } catch (reason) {
-    error.value = errorMessage(reason)
-  } finally {
-    clearing.value = false
-  }
+  try { await command('clear_history'); confirmingClear.value = false; await refresh() }
+  catch (reason) { error.value = errorMessage(reason) }
+  finally { clearing.value = false }
 }
 
 onMounted(async () => {
   try {
     for (const [name, handler] of [
-      ['history-changed', () => { void refresh() }],
+      ['history-changed', () => { reload.schedule() }],
       ['history-error', (event: { payload: unknown }) => { error.value = errorMessage(event.payload) }],
     ] as const) {
       const unlisten = await onEvent(name, handler)
@@ -86,16 +113,10 @@ onMounted(async () => {
       unlisteners.push(unlisten)
     }
     await refresh()
-  } catch (reason) {
-    if (!disposed) { error.value = errorMessage(reason); loading.value = false }
-  }
+  } catch (reason) { if (!disposed) { error.value = errorMessage(reason); loading.value = false } }
 })
 
-onBeforeUnmount(() => {
-  disposed = true
-  revision += 1
-  unlisteners.forEach((unlisten) => unlisten())
-})
+onBeforeUnmount(() => { disposed = true; revision += 1; detailRevision += 1; window.clearTimeout(searchTimer); reload.cancel(); unlisteners.forEach((unlisten) => unlisten()) })
 </script>
 
 <template>
@@ -113,7 +134,7 @@ onBeforeUnmount(() => {
       </label>
       <div class="history-actions">
         <button class="secondary-button small-button" type="button" data-no-autosave :disabled="clearing" @click="refresh"><AppIcon name="refresh" :size="13" />刷新</button>
-        <button class="secondary-button small-button" type="button" data-no-autosave :disabled="clearing || (!entries.length && !error)" @click="confirmingClear = !confirmingClear"><AppIcon name="trash" :size="13" />清空</button>
+        <button class="secondary-button small-button" type="button" data-no-autosave :disabled="clearing || (!total && !error)" @click="confirmingClear = !confirmingClear"><AppIcon name="trash" :size="13" />清空</button>
       </div>
     </div>
     <div v-if="confirmingClear" class="history-confirm" role="alert">
@@ -125,15 +146,16 @@ onBeforeUnmount(() => {
     </div>
     <div v-if="error" class="notice error-notice" role="alert">{{ error }}</div>
     <div v-if="loading" class="history-empty"><span class="spinner" />正在加载历史记录…</div>
-    <div v-else-if="error && !entries.length" class="history-empty"><AppIcon name="history" :size="28" /><strong>无法加载历史记录</strong><span>可尝试刷新；若记录文件已损坏，可清空后重新记录</span></div>
-    <div v-else-if="!entries.length" class="history-empty"><AppIcon name="history" :size="28" /><strong>暂无历史记录</strong><span>{{ settings.historyLimit === 0 ? '保留条数设为 0，历史记录已关闭' : '使用翻译、总结等 AI 动作后，请求内容与处理结果会显示在这里' }}</span></div>
-    <div v-else-if="!filteredEntries.length" class="history-empty"><AppIcon name="search" :size="28" /><strong>没有找到匹配记录</strong><span>试试其他关键词，或清除搜索查看全部记录</span><button class="secondary-button small-button" type="button" data-no-autosave @click="query = ''">查看全部记录</button></div>
+    <div v-else-if="error && !total" class="history-empty"><AppIcon name="history" :size="28" /><strong>无法加载历史记录</strong><span>可尝试刷新；若记录文件已损坏，可清空后重新记录</span></div>
+    <div v-else-if="!total" class="history-empty"><AppIcon name="history" :size="28" /><strong>暂无历史记录</strong><span>{{ settings.historyLimit === 0 ? '保留条数设为 0，历史记录已关闭' : '使用翻译、总结等 AI 动作后，请求内容与处理结果会显示在这里' }}</span></div>
+    <div v-else-if="!filteredTotal" class="history-empty"><AppIcon name="search" :size="28" /><strong>没有找到匹配记录</strong><span>试试其他关键词，或清除搜索查看全部记录</span><button class="secondary-button small-button" type="button" data-no-autosave @click="query = ''">查看全部记录</button></div>
     <div v-else class="history-layout">
-      <nav class="history-list" aria-label="请求历史">
-        <button v-for="entry in filteredEntries" :key="entry.id" type="button" data-no-autosave :class="{ active: selected?.id === entry.id }" :aria-current="selected?.id === entry.id ? 'true' : undefined" @click="selectedId = entry.id">
+      <nav class="history-list" aria-label="请求历史" @scroll="scrollList">
+        <button v-for="entry in entries" :key="entry.id" type="button" data-no-autosave :class="{ active: selected?.id === entry.id }" :aria-current="selected?.id === entry.id ? 'true' : undefined" @click="selectEntry(entry.id)">
           <div class="history-item-heading"><strong>{{ entry.actionName }}</strong><span class="history-status" :class="entry.status">{{ statusNames[entry.status] }}</span></div>
-          <p>{{ entry.selectedText }}</p><time :datetime="new Date(entry.createdAt).toISOString()">{{ formatDate(entry.createdAt) }}</time>
+          <p>{{ entry.preview }}</p><time :datetime="new Date(entry.createdAt).toISOString()">{{ formatDate(entry.createdAt) }}</time>
         </button>
+        <button v-if="entries.length < filteredTotal" type="button" data-no-autosave :disabled="loadingMore || searching || refreshing" @click="loadMore">{{ loadingMore ? '正在加载…' : '加载更多' }}</button>
       </nav>
       <article v-if="selected" :key="selected.id" class="history-detail" aria-label="历史记录详情">
         <header class="history-detail-header">
@@ -149,7 +171,7 @@ onBeforeUnmount(() => {
             <h4>处理结果</h4>
             <div v-if="selected.status === 'cancelled'" class="history-note">请求已停止，以下为停止前返回的内容。</div>
             <div v-if="selected.error" class="notice error-notice">{{ selected.error }}</div>
-            <div v-if="selected.result" class="history-result" v-html="renderedResult" @click.prevent />
+            <div v-if="selected.result" class="history-result markdown" v-html="renderedResult" @click.prevent />
             <p v-else class="history-note">未返回处理结果。</p>
           </section>
           <details class="history-prompt"><summary>查看实际请求内容</summary><h4>系统 Prompt</h4><pre class="history-text">{{ selected.systemPrompt || '（未设置）' }}</pre><h4>用户请求</h4><pre class="history-text">{{ selected.prompt }}</pre></details>
@@ -157,7 +179,7 @@ onBeforeUnmount(() => {
       </article>
     </div>
     <footer class="history-footer">
-      <span class="history-count" aria-live="polite">{{ searchTerms.length ? `${filteredEntries.length} / ${entries.length}` : entries.length }} 条</span>
+      <span class="history-count" aria-live="polite">{{ searching ? '正在搜索…' : query.trim() ? `${filteredTotal} / ${total} 条` : `${total} 条` }}</span>
       <span id="history-limit-tip" class="history-limit-tip" title="最多保留 1000 条；调小上限会立即删除最旧记录。">超限删除最旧记录</span>
     </footer>
   </section>
@@ -215,13 +237,6 @@ onBeforeUnmount(() => {
 .history-prompt { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); font-size: calc(11px * var(--font-scale)); }
 .history-prompt summary { cursor: pointer; color: var(--primary); }
 .history-result { font-size: calc(13px * var(--font-scale)); line-height: 1.65; overflow-wrap: anywhere; }
-.history-result :deep(p) { margin: 0 0 10px; }
-.history-result :deep(pre) { padding: 10px; overflow: auto; border-radius: 6px; background: var(--secondary); }
-.history-result :deep(code) { background: var(--secondary); font-size: .9em; }
-.history-result :deep(blockquote) { margin: 8px 0; padding-left: 10px; border-left: 3px solid var(--primary); color: var(--muted-foreground); }
-.history-result :deep(a) { color: var(--link); }
-.history-result :deep(table) { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
-.history-result :deep(th), .history-result :deep(td) { border: 1px solid var(--border); padding: 5px 8px; }
 .history-footer { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 12px; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: calc(10px * var(--font-scale)); line-height: 1.4; }
 .history-count { flex-shrink: 0; }
 .history-limit-tip { min-width: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

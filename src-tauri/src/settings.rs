@@ -25,6 +25,21 @@ impl SettingsStore {
         self.read(Clone::clone)
     }
 
+    pub fn directory(&self) -> PathBuf {
+        self.path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf()
+    }
+
+    pub fn modified_at(&self) -> u64 {
+        fs::metadata(&self.path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_millis() as u64)
+    }
+
     pub fn read<T>(&self, reader: impl FnOnce(&Settings) -> T) -> T {
         let value = self
             .value
@@ -49,7 +64,13 @@ impl SettingsStore {
             .map_err(|_| "设置存储已损坏".to_string())?;
         value.action_window_width = current.action_window_width;
         value.action_window_height = current.action_window_height;
+        if *current == value {
+            return Ok(value);
+        }
         let value = value.sanitized();
+        if *current == value {
+            return Ok(value);
+        }
         self.persist_value(&value)
             .map_err(|error| format!("无法保存设置：{error}"))?;
         *current = value.clone();

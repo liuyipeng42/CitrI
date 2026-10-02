@@ -103,6 +103,18 @@ pub struct ChatDelta {
     finish_reason: Option<String>,
 }
 
+#[derive(Default)]
+struct ChatResponse {
+    content: String,
+    has_reasoning: bool,
+    finish_reason: Option<String>,
+}
+
+pub struct ChatCompletion {
+    pub content: String,
+    pub error: Option<String>,
+}
+
 fn extract_delta(payload: &Value) -> ChatDelta {
     let reasoning = ["delta", "message"]
         .into_iter()
@@ -128,19 +140,19 @@ fn extract_delta(payload: &Value) -> ChatDelta {
     }
 }
 
-fn require_response_text(response: ChatDelta) -> Result<String, String> {
+fn require_response_text(response: &ChatResponse) -> Result<(), String> {
     if response.finish_reason.as_deref() == Some("length") {
         return Err(
             "已达到输出 Token 上限，回答可能未完成；请提高设置中的最大输出 Token 后重试".into(),
         );
     }
-    if response.content.trim().is_empty() && !response.reasoning.trim().is_empty() {
+    if response.content.trim().is_empty() && response.has_reasoning {
         return Err("模型仅返回了思考内容，未返回最终回答；思考内容已保留，可提高最大输出 Token 或检查服务端结束原因后重试".into());
     }
     if response.content.trim().is_empty() {
         Err("API 未返回文本内容，请检查模型和接口配置".into())
     } else {
-        Ok(response.content)
+        Ok(())
     }
 }
 
@@ -164,11 +176,15 @@ fn parse_sse_block(block: &str) -> Result<(bool, ChatDelta), String> {
     Ok((false, extract_delta(&payload)))
 }
 
-fn append_delta(result: &mut ChatDelta, delta: ChatDelta, on_delta: &mut impl FnMut(ChatDelta)) {
+fn append_delta(
+    result: &mut ChatResponse,
+    mut delta: ChatDelta,
+    on_delta: &mut impl FnMut(ChatDelta),
+) {
     result.content.push_str(&delta.content);
-    result.reasoning.push_str(&delta.reasoning);
+    result.has_reasoning |= !delta.reasoning.trim().is_empty();
     if delta.finish_reason.is_some() {
-        result.finish_reason = delta.finish_reason.clone();
+        result.finish_reason = delta.finish_reason.take();
     }
     if !delta.content.is_empty() || !delta.reasoning.is_empty() {
         on_delta(delta);
@@ -200,15 +216,24 @@ fn next_sse_block(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     Some(block)
 }
 
+pub fn response_system_prompt(profile: &ApiProfile) -> String {
+    const FORMAT: &str = "请使用 Markdown 格式输出回答，按内容需要使用标题、列表、表格、引用和代码块。代码块注明语言；不要将整个回答包在 Markdown 代码块中，不要输出 HTML。";
+    let custom = profile.system_prompt.trim();
+    if custom.is_empty() {
+        FORMAT.into()
+    } else {
+        format!("{custom}\n\n{FORMAT}")
+    }
+}
+
 fn request_body(profile: &ApiProfile, prompt: &str) -> Value {
     let mut body = profile.extra_body.clone();
-    let mut messages = Vec::new();
-    if !profile.system_prompt.trim().is_empty() {
-        messages.push(json!({ "role": "system", "content": profile.system_prompt.trim() }));
-    }
-    messages.push(json!({ "role": "user", "content": prompt }));
+    let messages = json!([
+        { "role": "system", "content": response_system_prompt(profile) },
+        { "role": "user", "content": prompt }
+    ]);
     body.insert("model".into(), Value::String(profile.model.clone()));
-    body.insert("messages".into(), Value::Array(messages));
+    body.insert("messages".into(), messages);
     body.insert("temperature".into(), json!(profile.temperature));
     body.insert("max_tokens".into(), json!(profile.max_tokens));
     body.insert("stream".into(), Value::Bool(true));
@@ -219,8 +244,23 @@ pub async fn stream_chat_completion(
     profile: &ApiProfile,
     prompt: &str,
     cancellation: &CancellationToken,
+    on_delta: impl FnMut(ChatDelta),
+) -> ChatCompletion {
+    let mut response = ChatResponse::default();
+    let outcome = stream_into(profile, prompt, cancellation, &mut response, on_delta).await;
+    ChatCompletion {
+        content: response.content,
+        error: outcome.err(),
+    }
+}
+
+async fn stream_into(
+    profile: &ApiProfile,
+    prompt: &str,
+    cancellation: &CancellationToken,
+    result: &mut ChatResponse,
     mut on_delta: impl FnMut(ChatDelta),
-) -> Result<String, String> {
+) -> Result<(), String> {
     if profile.api_key.trim().is_empty() {
         return Err("请先在设置中填写 API Key".into());
     }
@@ -273,14 +313,12 @@ pub async fn stream_chat_completion(
             payload = response.json() => payload.map_err(|error| format!("API 响应格式错误：{error}"))?,
         };
         check_api_error(&payload)?;
-        let mut result = ChatDelta::default();
-        append_delta(&mut result, extract_delta(&payload), &mut on_delta);
+        append_delta(result, extract_delta(&payload), &mut on_delta);
         return require_response_text(result);
     }
 
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
-    let mut result = ChatDelta::default();
     loop {
         let next = tokio::select! {
             _ = cancellation.cancelled() => return Err("__CANCELLED__".into()),
@@ -294,20 +332,23 @@ pub async fn stream_chat_completion(
             return Err("API 流中的单个事件过大".into());
         }
         while let Some(block) = next_sse_block(&mut buffer) {
+            if cancellation.is_cancelled() {
+                return Err("__CANCELLED__".into());
+            }
             let block =
                 String::from_utf8(block).map_err(|_| "API 流不是有效 UTF-8 文本".to_string())?;
             let (done, delta) = parse_sse_block(&block)?;
             if done {
                 return require_response_text(result);
             }
-            append_delta(&mut result, delta, &mut on_delta);
+            append_delta(result, delta, &mut on_delta);
         }
     }
     if !buffer.iter().all(u8::is_ascii_whitespace) {
         let block =
             String::from_utf8(buffer).map_err(|_| "API 流不是有效 UTF-8 文本".to_string())?;
         let (_, delta) = parse_sse_block(&block)?;
-        append_delta(&mut result, delta, &mut on_delta);
+        append_delta(result, delta, &mut on_delta);
     }
     require_response_text(result)
 }
@@ -318,7 +359,7 @@ mod tests {
 
     #[test]
     fn reasoning_chunks_are_emitted_before_the_final_answer() {
-        let mut result = ChatDelta::default();
+        let mut result = ChatResponse::default();
         let mut events = Vec::new();
         for payload in [
             json!({"choices":[{"delta":{"reasoning_content":"分析问题"}}]}),
@@ -334,9 +375,10 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].reasoning, "分析问题");
         assert!(events[0].content.is_empty());
-        assert_eq!(result.reasoning, "分析问题，核对结果");
+        assert!(result.has_reasoning);
         assert_eq!(result.finish_reason.as_deref(), Some("stop"));
-        assert_eq!(require_response_text(result).unwrap(), "最终回答");
+        require_response_text(&result).unwrap();
+        assert_eq!(result.content, "最终回答");
     }
 
     #[test]
@@ -344,14 +386,18 @@ mod tests {
         let payload = json!({"choices":[{"message":{"content":null,"reasoning_content":"思考内容"},"finish_reason":"length"}]});
         let delta = extract_delta(&payload);
         assert_eq!(delta.reasoning, "思考内容");
+        let mut response = ChatResponse::default();
+        append_delta(&mut response, delta, &mut |_| {});
         assert!(
-            require_response_text(delta)
+            require_response_text(&response)
                 .unwrap_err()
                 .contains("Token 上限")
         );
         let payload = json!({"choices":[{"message":{"content":null,"reasoning_content":"思考内容"},"finish_reason":"stop"}]});
+        let mut response = ChatResponse::default();
+        append_delta(&mut response, extract_delta(&payload), &mut |_| {});
         assert!(
-            require_response_text(extract_delta(&payload))
+            require_response_text(&response)
                 .unwrap_err()
                 .contains("仅返回了思考内容")
         );
@@ -383,14 +429,13 @@ mod tests {
                 .contains("quota exceeded")
         );
         assert!(parse_sse_block(&format!("data: {payload}")).is_err());
-        assert!(require_response_text(ChatDelta::default()).is_err());
-        assert_eq!(
-            require_response_text(ChatDelta {
+        assert!(require_response_text(&ChatResponse::default()).is_err());
+        assert!(
+            require_response_text(&ChatResponse {
                 content: "OK".into(),
                 ..Default::default()
             })
-            .unwrap(),
-            "OK"
+            .is_ok()
         );
     }
 
@@ -427,10 +472,53 @@ mod tests {
             .extra_body
             .insert("stream".into(), Value::Bool(false));
         assert_eq!(request_body(&profile, "hello")["stream"], true);
+        profile.system_prompt = "  准确翻译  ".into();
+        profile.extra_body.insert("messages".into(), json!([]));
+        let body = request_body(&profile, "hello");
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.starts_with("准确翻译\n\n"));
+        assert!(system.contains("请使用 Markdown 格式输出回答"));
+        assert_eq!(system, response_system_prompt(&profile));
+        assert_eq!(body["messages"][1]["content"], "hello");
+        profile.system_prompt.clear();
+        assert!(response_system_prompt(&profile).starts_with("请使用 Markdown"));
     }
 
     #[test]
     fn reuses_the_api_client() {
         assert!(std::ptr::eq(api_client().unwrap(), api_client().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn streamed_failures_and_cancellation_keep_partial_content_without_a_second_buffer() {
+        let body=b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n".to_vec();
+        let (url, server) = crate::data::tests::mock_server(vec![
+            (
+                "200 OK".into(),
+                "Content-Type: text/event-stream\r\n".into(),
+                body.clone(),
+            ),
+            (
+                "200 OK".into(),
+                "Content-Type: text/event-stream\r\n".into(),
+                body,
+            ),
+        ]);
+        let profile = ApiProfile {
+            api_url: url,
+            api_key: "test-key".into(),
+            ..ApiProfile::default()
+        };
+        let response =
+            stream_chat_completion(&profile, "hello", &CancellationToken::new(), |_| {}).await;
+        assert_eq!(response.content, "partial");
+        assert!(response.error.unwrap().contains("Token 上限"));
+        let cancellation = CancellationToken::new();
+        let response =
+            stream_chat_completion(&profile, "hello", &cancellation, |_| cancellation.cancel())
+                .await;
+        assert_eq!(response.content, "partial");
+        assert_eq!(response.error.as_deref(), Some("__CANCELLED__"));
+        server.join().unwrap();
     }
 }

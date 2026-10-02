@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import AppIcon from '@/components/AppIcon.vue'
 import { command, errorMessage, onEvent } from '@/lib/bridge'
@@ -11,10 +11,11 @@ import AppearanceSettings from '@/views/settings/AppearanceSettings.vue'
 import FiltersSettings from '@/views/settings/FiltersSettings.vue'
 import GeneralSettings from '@/views/settings/GeneralSettings.vue'
 import HistorySettings from '@/views/settings/HistorySettings.vue'
+import SyncSettings from '@/views/settings/SyncSettings.vue'
 import logoUrl from '@/assets/logo.png'
 import './settings.css'
 
-type Page = 'general' | 'api' | 'actions' | 'appearance' | 'history' | 'filters'
+type Page = 'general' | 'api' | 'actions' | 'appearance' | 'history' | 'sync' | 'filters'
 
 const pages: Array<{ id: Page; icon: string; title: string; description: string }> = [
   { id: 'general', icon: 'sparkles', title: '基础设置', description: '开启 CitrI 并预览工具条' },
@@ -22,6 +23,7 @@ const pages: Array<{ id: Page; icon: string; title: string; description: string 
   { id: 'actions', icon: 'align-left', title: '动作与 Prompt', description: '管理工具条动作、顺序与提示词' },
   { id: 'appearance', icon: 'droplet', title: '界面与窗口', description: '调整工具条和结果窗口的外观与行为' },
   { id: 'history', icon: 'history', title: '历史记录', description: '查看最近的 AI 请求内容与处理结果' },
+  { id: 'sync', icon: 'refresh', title: '数据同步', description: 'ZIP 备份与恢复，WebDAV 多设备同步' },
   { id: 'filters', icon: 'search', title: '应用过滤', description: '控制在哪些应用中响应划词' },
 ]
 const settings = ref<Settings | null>(null)
@@ -31,15 +33,28 @@ const statusKind = ref<'normal' | 'success' | 'error'>('normal')
 const serviceError = ref('')
 const platformNotice = ref('')
 const saving = ref(false)
+const dataBusy = ref(false)
+const hasUnsavedDraft = ref(false)
 const filterListText = ref('')
 const apiSettings = ref<InstanceType<typeof ApiSettings> | null>(null)
 let statusTimer: number | undefined
 let unlistenSelectionError: UnlistenFn | undefined
+let unlistenRestored: UnlistenFn | undefined
+let editingSignaled = false
 let editRevision = 0
 let saveRequested = false
 const editedFields = new WeakSet<Element>()
 
 const currentPage = computed(() => pages.find((item) => item.id === page.value) ?? pages[0]!)
+
+function selectPage(next: Page): void {
+  if (page.value === 'api') {
+    try { apiSettings.value?.commit() }
+    catch (error) { setStatus(errorMessage(error), 'error'); return }
+    if (hasUnsavedDraft.value) requestSave()
+  }
+  page.value = next
+}
 
 function setStatus(message: string, kind: 'normal' | 'success' | 'error' = 'normal'): void {
   window.clearTimeout(statusTimer)
@@ -49,9 +64,37 @@ function setStatus(message: string, kind: 'normal' | 'success' | 'error' = 'norm
 }
 
 function requestSave(): void {
+  hasUnsavedDraft.value = true
+  signalEditing(true)
   editRevision += 1
   saveRequested = true
   void flushSaves()
+}
+
+function signalEditing(editing: boolean): void {
+  if (editingSignaled === editing) return
+  editingSignaled = editing
+  void command('set_sync_editing', { editing }).catch(() => {})
+}
+
+async function prepareDataOperation(): Promise<void> {
+  if (hasUnsavedDraft.value) requestSave()
+  if (saving.value) await new Promise<void>((resolve) => {
+    const stop = watch(saving, (value) => { if (!value) { stop(); resolve() } })
+  })
+  if (hasUnsavedDraft.value) throw new Error(status.value || '设置尚未保存，请先完成编辑')
+}
+
+async function applyRestoredSettings(restored: Settings): Promise<void> {
+  // A background sync must not discard a draft the user is currently editing.
+  if (hasUnsavedDraft.value || saving.value) return
+  editRevision += 1
+  settings.value = restored
+  filterListText.value = restored.filterList.join('\n')
+  await nextTick()
+  apiSettings.value?.reload()
+  applyAppearance(restored)
+  setStatus('已更新设置与数据', 'success')
 }
 
 function isTextField(target: EventTarget | null): target is HTMLInputElement | HTMLTextAreaElement {
@@ -60,6 +103,8 @@ function isTextField(target: EventTarget | null): target is HTMLInputElement | H
 }
 
 function noteDraftEdit(event: Event): void {
+  hasUnsavedDraft.value = true
+  signalEditing(true)
   // Text fields save on change/blur, but typing must still invalidate an older
   // in-flight response so it cannot overwrite the unsaved draft.
   editRevision += 1
@@ -67,6 +112,8 @@ function noteDraftEdit(event: Event): void {
 }
 
 function noteLocalDraftChange(): void {
+  hasUnsavedDraft.value = true
+  signalEditing(true)
   // API parameter rows live outside `settings` until ApiSettings commits them.
   // Invalidate any older save response so its reload cannot discard a new row.
   editRevision += 1
@@ -104,6 +151,8 @@ async function flushSaves(): Promise<void> {
         // A newer edit may arrive while Rust is writing the previous snapshot.
         // Never replace that newer local state with an older response.
         if (editRevision === revision) {
+          hasUnsavedDraft.value = false
+          signalEditing(false)
           settings.value = saved
           filterListText.value = saved.filterList.join('\n')
           await nextTick()
@@ -134,11 +183,14 @@ onMounted(async () => {
       platformNotice.value = 'Wayland 对全局鼠标监听有限制；如果桌面环境不支持所需协议，请切换到 X11/XWayland。'
     }
     unlistenSelectionError = await onEvent<string>('selection-error', (event) => (serviceError.value = event.payload ?? ''))
+    unlistenRestored = await onEvent<Settings>('settings-restored', (event) => { void applyRestoredSettings(event.payload) })
   } catch (error) { setStatus(errorMessage(error), 'error') }
 })
 
 onBeforeUnmount(() => {
   unlistenSelectionError?.()
+  unlistenRestored?.()
+  signalEditing(false)
   window.clearTimeout(statusTimer)
 })
 </script>
@@ -148,7 +200,7 @@ onBeforeUnmount(() => {
     <aside class="settings-sidebar">
       <div class="sidebar-brand"><img :src="logoUrl" alt="" /><div><strong>CitrI</strong><span>设置</span></div></div>
       <nav class="sidebar-nav" aria-label="设置目录">
-        <button v-for="item in pages" :key="item.id" type="button" :class="{ active: page === item.id }" :aria-selected="page === item.id" @click="page = item.id">
+        <button v-for="item in pages" :key="item.id" type="button" :disabled="dataBusy" :class="{ active: page === item.id }" :aria-selected="page === item.id" @click="selectPage(item.id)">
           <AppIcon :name="item.icon" :size="17" /><span>{{ item.title }}</span>
         </button>
       </nav>
@@ -165,14 +217,15 @@ onBeforeUnmount(() => {
         <div v-if="serviceError" class="notice error-notice">{{ serviceError }}</div>
         <div v-if="platformNotice" class="notice warning-notice">{{ platformNotice }}</div>
 
-        <GeneralSettings v-show="page === 'general'" v-model="settings" />
+        <GeneralSettings v-if="page === 'general'" v-model="settings" />
 
-        <ApiSettings ref="apiSettings" v-show="page === 'api'" v-model="settings" @status="setStatus" @draft-change="noteLocalDraftChange" />
+        <ApiSettings ref="apiSettings" v-if="page === 'api'" v-model="settings" @status="setStatus" @draft-change="noteLocalDraftChange" />
 
-        <ActionsSettings v-show="page === 'actions'" v-model="settings" />
-        <AppearanceSettings v-show="page === 'appearance'" v-model="settings" />
+        <ActionsSettings v-if="page === 'actions'" v-model="settings" />
+        <AppearanceSettings v-if="page === 'appearance'" v-model="settings" />
         <HistorySettings v-if="page === 'history'" v-model="settings" />
-        <FiltersSettings v-show="page === 'filters'" v-model:settings="settings" v-model:filter-list="filterListText" />
+        <SyncSettings v-if="page === 'sync'" :settings-saving="saving" :prepare="prepareDataOperation" @busy="dataBusy = $event" />
+        <FiltersSettings v-if="page === 'filters'" v-model:settings="settings" v-model:filter-list="filterListText" />
       </main>
 
       <div v-else class="loading-state"><span class="spinner" />正在加载设置…</div>

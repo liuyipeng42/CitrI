@@ -401,6 +401,9 @@ pub enum HistoryStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct HistoryEntry {
+    pub sync_id: String,
+    #[ts(type = "number")]
+    pub revived_at: u64,
     #[ts(type = "number")]
     pub id: u64,
     #[ts(type = "number")]
@@ -413,6 +416,83 @@ pub struct HistoryEntry {
     pub result: String,
     pub status: HistoryStatus,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct HistorySummary {
+    #[ts(type = "number")]
+    pub id: u64,
+    #[ts(type = "number")]
+    pub created_at: u64,
+    pub action_name: String,
+    pub preview: String,
+    pub status: HistoryStatus,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct HistoryPage {
+    pub entries: Vec<HistorySummary>,
+    pub total: usize,
+    pub filtered_total: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct SyncPreferences {
+    pub url: String,
+    pub username: String,
+    pub password: String,
+    pub auto_sync: bool,
+    pub interval_minutes: u32,
+    pub include_api_keys: bool,
+}
+
+impl Default for SyncPreferences {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            username: String::new(),
+            password: String::new(),
+            auto_sync: false,
+            interval_minutes: 5,
+            include_api_keys: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, TS, Default)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SyncStatus {
+    pub busy: bool,
+    #[ts(type = "number")]
+    pub last_synced_at: u64,
+    pub message: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DataInfo {
+    pub directory: String,
+    pub history_count: usize,
+    pub preferences: SyncPreferences,
+    pub status: SyncStatus,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DataOperationResult {
+    pub message: String,
+    pub history_count: usize,
+    pub path: Option<String>,
 }
 
 pub fn default_actions() -> Vec<ActionItem> {

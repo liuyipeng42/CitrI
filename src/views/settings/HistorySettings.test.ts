@@ -50,6 +50,8 @@ async function search(text: string): Promise<void> {
   input.dispatchEvent(new Event('change', { bubbles: true }))
   input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
   await flush()
+  await vi.advanceTimersByTimeAsync(220)
+  await flush()
 }
 
 async function openHistory(): Promise<void> {
@@ -61,19 +63,26 @@ async function openHistory(): Promise<void> {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers()
   root = document.createElement('div')
   document.body.append(root)
   records = [{
+    syncId: 'test-history-1', revivedAt: 0,
     id: 1, createdAt: Date.now(), actionName: '翻译', model: 'test-model', selectedText: 'hello',
     prompt: '翻译 hello', systemPrompt: '准确翻译', result: '**你好**<img src="x" onerror="alert(1)"><script>alert(1)</script>',
     status: 'success', error: null,
   }]
   bridge.listeners.clear()
   bridge.unlisten.mockClear()
-  bridge.command.mockReset().mockImplementation(async (name: string, args?: { settings: Settings }) => {
+  bridge.command.mockReset().mockImplementation(async (name: string, args?: { settings?: Settings; query?: string; offset?: number; limit?: number; id?: number }) => {
     if (name === 'get_settings') return fixtureSettings()
     if (name === 'platform_info') return { platform: 'windows', displayProtocol: 'unknown' }
-    if (name === 'get_history') return structuredClone(records)
+    if (name === 'list_history') {
+      const terms = (args?.query ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean)
+      const matches = records.filter((entry) => terms.every((term) => [entry.actionName, entry.model, entry.selectedText, entry.prompt, entry.systemPrompt, entry.result, entry.error ?? ''].join('\n').toLowerCase().includes(term)))
+      return { total: records.length, filteredTotal: matches.length, entries: matches.slice(args?.offset ?? 0, (args?.offset ?? 0) + (args?.limit ?? 50)).map((entry) => ({ id: entry.id, createdAt: entry.createdAt, actionName: entry.actionName, preview: entry.selectedText.slice(0, 160), status: entry.status })) }
+    }
+    if (name === 'get_history_entry') return structuredClone(records.find((entry) => entry.id === args?.id) ?? null)
     if (name === 'save_settings') return structuredClone(args!.settings)
     if (name === 'clear_history') { records = []; return }
     throw new Error(`意外调用：${name}`)
@@ -84,6 +93,7 @@ afterEach(() => {
   app?.unmount()
   app = undefined
   root.remove()
+  vi.useRealTimers()
 })
 
 describe('历史记录设置与交互', () => {
@@ -134,6 +144,7 @@ describe('历史记录设置与交互', () => {
     await openHistory()
     records = [{ ...records[0]!, id: 2, status: 'error', result: '', error: '连接失败' }]
     bridge.listeners.get('history-changed')!({ payload: null })
+    await vi.advanceTimersByTimeAsync(100)
     await flush()
     expect(root.querySelector('.history-detail')?.textContent).toContain('连接失败')
     button('界面与窗口').click()
@@ -157,8 +168,8 @@ describe('历史记录设置与交互', () => {
   it('reports unreadable history and allows a confirmed reset', async () => {
     const implementation = bridge.command.getMockImplementation()!
     let damaged = true
-    bridge.command.mockImplementation(async (name: string, args?: { settings: Settings }) => {
-      if (name === 'get_history' && damaged) throw new Error('无法读取历史记录')
+    bridge.command.mockImplementation(async (name: string, args?: { settings?: Settings; query?: string; offset?: number; limit?: number; id?: number }) => {
+      if (name === 'list_history' && damaged) throw new Error('无法读取历史记录')
       if (name === 'clear_history') damaged = false
       return implementation(name, args)
     })
@@ -186,7 +197,7 @@ describe('历史记录设置与交互', () => {
       expect(root.querySelector('.history-detail')?.textContent).toContain('另一段原文')
     }
     expect(bridge.command.mock.calls.filter(([name]) => name === 'save_settings')).toHaveLength(0)
-    expect(bridge.command.mock.calls.filter(([name]) => name === 'get_history')).toHaveLength(1)
+    expect(bridge.command.mock.calls.filter(([name]) => name === 'get_history_entry')).toHaveLength(2)
   })
 
   it('shows no matching results and restores all records when search is cleared', async () => {
@@ -196,6 +207,7 @@ describe('历史记录设置与交互', () => {
     expect(root.querySelector('.history-detail')).toBeNull()
     expect(root.querySelector('.history-count')?.textContent).toBe('0 / 1 条')
     root.querySelector<HTMLButtonElement>('[aria-label="清除搜索"]')!.click()
+    await vi.advanceTimersByTimeAsync(220)
     await flush()
     expect(root.querySelector('.history-count')?.textContent).toBe('1 条')
     expect(root.querySelector('.history-detail')?.textContent).toContain('hello')
@@ -207,12 +219,26 @@ describe('历史记录设置与交互', () => {
     await search('新增结果')
     records.unshift({ ...records[0]!, id: 2, selectedText: '新原文', result: '新增结果' })
     bridge.listeners.get('history-changed')!({ payload: null })
+    await vi.advanceTimersByTimeAsync(100)
     await flush()
     expect(root.querySelectorAll('.history-list button')).toHaveLength(1)
     expect(root.querySelector('.history-detail')?.textContent).toContain('新原文')
     root.querySelector('.history-search input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await vi.advanceTimersByTimeAsync(220)
     await flush()
     expect(root.querySelectorAll('.history-list button')).toHaveLength(2)
     expect(bridge.command.mock.calls.filter(([name]) => name === 'save_settings')).toHaveLength(0)
+  })
+
+  it('loads summaries in pages and reads only the selected detail', async () => {
+    const prototype = records[0]!
+    records = Array.from({ length: 95 }, (_, index) => ({ ...prototype, id: 95 - index, syncId: `record-${index}`, result: 'x'.repeat(50_000) }))
+    await openHistory()
+    expect(root.querySelectorAll('.history-item-heading')).toHaveLength(50)
+    expect(bridge.command.mock.calls.filter(([name]) => name === 'get_history_entry')).toHaveLength(1)
+    button('加载更多').click(); await flush()
+    expect(root.querySelectorAll('.history-item-heading')).toHaveLength(95)
+    expect(bridge.command).toHaveBeenCalledWith('list_history', { query: '', offset: 50, limit: 50 })
+    expect(root.querySelector('.history-count')?.textContent).toBe('95 条')
   })
 })
