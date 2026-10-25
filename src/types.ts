@@ -18,11 +18,3 @@ export type { SyncPreferences } from '@/generated/SyncPreferences'
 export type { SyncStatus } from '@/generated/SyncStatus'
 export type { ToolbarState } from '@/generated/ToolbarState'
 export type { JsonValue } from '@/generated/serde_json/JsonValue'
-
-export type ExtraParameterType = 'string' | 'boolean' | 'number' | 'json'
-
-export interface ExtraParameter {
-  key: string
-  type: ExtraParameterType
-  value: string
-}

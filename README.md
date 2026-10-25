@@ -154,6 +154,7 @@ AI 请求会在自定义系统 Prompt 后追加 Markdown 输出指令，结果�
 
 ```bash
 npm run tauri dev     # 启动桌面开发版本
+npm run types:generate # 从 Rust 更新前端接口类型
 npm run check         # TypeScript / Vue 类型检查
 npm test              # 前端测试
 npm run build         # 构建前端资源
@@ -179,20 +180,31 @@ cargo check --tests
 
 ```text
 CitrI/
-├── src/                         Vue 3 多窗口前端
-│   ├── views/SettingsView.vue  设置窗口
-│   ├── views/ToolbarView.vue   划词工具条
-│   └── views/ActionView.vue    AI 结果窗口
-├── src-tauri/
-│   ├── src/selection.rs        全局手势、选区读取和应用过滤
-│   ├── src/windows.rs          工具条与结果窗口生命周期
-│   ├── src/api.rs              API URL、Prompt、SSE 和请求取消
-│   ├── src/settings.rs         配置读取与原子持久化
-│   ├── src/history_store.rs    SQLite 历史、分页与搜索
-│   ├── src/data.rs             ZIP 格式、数据合并与 WebDAV
-│   ├── src/models.rs           配置模型、默认值和输入清洗
-│   └── src/lib.rs              Tauri 命令、托盘、事件和权限校验
-└── src-tauri/capabilities/     Tauri 2 窗口能力声明
+├── src/
+│   ├── features/               按功能组织页面、样式、状态和测试
+│   │   ├── action/             AI 结果窗口与思考流
+│   │   ├── toolbar/            划词工具条
+│   │   ├── settings/           设置窗口、编辑状态、API 与基础面板
+│   │   ├── history/            历史查询与详情
+│   │   └── sync/               备份与 WebDAV 设置
+│   ├── components/             共享界面组件
+│   ├── lib/                    IPC、事件清理、Markdown、主题和调度工具
+│   └── generated/              从 Rust 自动生成的接口类型
+├── src-tauri/src/
+│   ├── assistant/              AI 请求、SSE 协议与取消处理
+│   ├── commands/               按功能分类的 IPC 命令与窗口权限校验
+│   ├── data/                   备份格式、事务、同步配置与 WebDAV
+│   ├── desktop/                窗口生命周期、托盘和设置应用
+│   ├── history/                SQLite 历史、分页、搜索与合并
+│   ├── models/                 按领域分类的接口类型、默认值和输入清洗
+│   ├── selection/              输入监听、选区读取、过滤和工具条定位
+│   │   └── windows/            Windows hook 恢复与 UI Automation
+│   ├── settings.rs             配置存储
+│   ├── state.rs                应用共享状态
+│   ├── storage.rs              共享原子文件写入
+│   └── lib.rs                  应用初始化与命令注册
+├── scripts/                    开发维护脚本
+└── src-tauri/capabilities/      Tauri 2 窗口能力声明
 ```
 
 ## 安全与隐私

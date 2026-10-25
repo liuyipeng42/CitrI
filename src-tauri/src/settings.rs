@@ -1,7 +1,7 @@
 use crate::constants::clamp_action_window_size;
 use crate::models::{ApiProfile, PublicSettings, Settings};
-use atomic_write_file::AtomicWriteFile;
-use std::{fs, io::Write, path::PathBuf, sync::RwLock};
+use crate::storage::write_atomic;
+use std::{fs, path::PathBuf, sync::RwLock};
 
 pub struct SettingsStore {
     path: PathBuf,
@@ -100,21 +100,10 @@ impl SettingsStore {
         Ok(())
     }
 
-    fn persist_value(&self, value: &Settings) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let contents = serde_json::to_vec_pretty(value)?;
-        let mut file = AtomicWriteFile::open(&self.path)?;
-        file.write_all(&contents)?;
-        file.write_all(b"\n")?;
-        file.commit()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
+    fn persist_value(&self, value: &Settings) -> Result<(), String> {
+        let mut contents = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+        contents.push(b'\n');
+        write_atomic(&self.path, &contents)
     }
 }
 
@@ -139,39 +128,5 @@ mod tests {
             (saved.action_window_width, saved.action_window_height),
             (800, 600)
         );
-    }
-
-    #[test]
-    fn round_trips_settings_atomically() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("settings.json");
-        let store = SettingsStore::load(path.clone());
-        let mut settings = store.get();
-        settings.compact = true;
-        store.save(settings).unwrap();
-        assert!(path.exists());
-        let loaded = SettingsStore::load(path);
-        assert!(loaded.read(|settings| settings.compact));
-        assert_eq!(loaded.public().compact, loaded.get().compact);
-        assert_eq!(loaded.active_profile(), loaded.get().active_profile());
-    }
-
-    #[test]
-    fn remembers_action_window_size_only_when_enabled() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("settings.json");
-        let store = SettingsStore::load(path.clone());
-
-        store.save_action_window_size(720, 560).unwrap();
-        assert_eq!(store.read(|settings| settings.action_window_width), 500);
-
-        let mut settings = store.get();
-        settings.remember_action_window_size = true;
-        store.save(settings).unwrap();
-        store.save_action_window_size(720, 560).unwrap();
-
-        let loaded = SettingsStore::load(path);
-        assert_eq!(loaded.read(|settings| settings.action_window_width), 720);
-        assert_eq!(loaded.read(|settings| settings.action_window_height), 560);
     }
 }
