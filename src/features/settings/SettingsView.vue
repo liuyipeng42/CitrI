@@ -155,7 +155,7 @@ onBeforeUnmount(() => {
           </button>
         </nav>
 
-        <div class="mt-auto px-2.5 pt-3 text-[11px] tabular-nums text-muted-foreground/75">CitrI v0.3.4</div>
+        <div class="mt-auto px-2.5 pt-3 text-[11px] tabular-nums text-muted-foreground/75">CitrI v0.3.5</div>
       </aside>
 
       <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tl-xl border-l border-t border-border bg-background">
