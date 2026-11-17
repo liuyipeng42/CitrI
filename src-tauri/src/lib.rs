@@ -68,6 +68,7 @@ pub fn run() {
             commands::actions::assistant_stop,
             commands::targets::clipboard_write,
             commands::window::window_control,
+            commands::window::settings_window_control,
             commands::targets::open_target,
         ])
         .run(tauri::generate_context!())

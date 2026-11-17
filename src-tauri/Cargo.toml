@@ -8,7 +8,7 @@ rust-version = "1.88"
 
 [lib]
 name = "citri_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.5.3", features = [] }
@@ -46,9 +46,12 @@ windows = { version = "0.61.3", features = ["Win32_System_Com", "Win32_UI_Access
 [dev-dependencies]
 tempfile = "3.23.0"
 
-# Optimize across crates while retaining the default runtime optimization level.
-# Release linking takes longer; development builds are unaffected.
+# Fast everyday release builds; use `--profile dist` for final distribution.
 [profile.release]
+codegen-units = 16
+strip = "symbols"
+
+[profile.dist]
+inherits = "release"
 lto = "thin"
 codegen-units = 1
-strip = "symbols"

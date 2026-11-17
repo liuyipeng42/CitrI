@@ -17,6 +17,7 @@ import ActionView from './ActionView.vue'
 it('renders streamed Markdown and flushes the final chunk on completion', async () => {
   vi.useFakeTimers()
   vi.stubGlobal('matchMedia', () => ({ matches: true }))
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   const oldScroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTo')
   Object.defineProperty(HTMLElement.prototype, 'scrollTo', { configurable: true, value: vi.fn() })
   bridge.command.mockImplementation(async (name: string) => name === 'get_action_session' ? {

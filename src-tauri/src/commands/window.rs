@@ -41,15 +41,10 @@ pub fn window_control(
             window.start_dragging().map_err(|error| error.to_string())?;
         }
         "resize" => {
-            let direction = parse_resize_direction(direction.as_deref())?;
             state.with_session_mut(window.label(), |session| {
                 session.begin_native_interaction();
             });
-            window
-                .as_ref()
-                .window()
-                .start_resize_dragging(direction)
-                .map_err(|error| error.to_string())?;
+            start_window_resize(&window, direction.as_deref())?;
         }
         "pin" => {
             let pinned = value.unwrap_or(false);
@@ -68,6 +63,42 @@ pub fn window_control(
         _ => return Err("不支持的窗口操作".into()),
     }
     Ok(false)
+}
+
+#[tauri::command]
+pub fn settings_window_control(
+    window: WebviewWindow,
+    operation: String,
+    direction: Option<String>,
+) -> Result<bool, String> {
+    require_window(&window, "settings")?;
+    match operation.as_str() {
+        "close" => window.close().map_err(|error| error.to_string())?,
+        "minimize" => window.minimize().map_err(|error| error.to_string())?,
+        "toggle-maximize" => {
+            let next = !window.is_maximized().unwrap_or(false);
+            if next {
+                window.maximize().map_err(|error| error.to_string())?;
+            } else {
+                window.unmaximize().map_err(|error| error.to_string())?;
+            }
+            return Ok(next);
+        }
+        "is-maximized" => return Ok(window.is_maximized().unwrap_or(false)),
+        "drag" => window.start_dragging().map_err(|error| error.to_string())?,
+        "resize" => start_window_resize(&window, direction.as_deref())?,
+        _ => return Err("不支持的窗口操作".into()),
+    }
+    Ok(false)
+}
+
+fn start_window_resize(window: &WebviewWindow, direction: Option<&str>) -> Result<(), String> {
+    let direction = parse_resize_direction(direction)?;
+    window
+        .as_ref()
+        .window()
+        .start_resize_dragging(direction)
+        .map_err(|error| error.to_string())
 }
 
 fn parse_resize_direction(direction: Option<&str>) -> Result<ResizeDirection, String> {

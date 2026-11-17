@@ -4,8 +4,11 @@ import { useReasoning } from './useReasoning'
 import { useAppEvents } from '@/lib/events'
 import { renderMarkdown } from '@/lib/markdown'
 import AppIcon from '@/components/AppIcon.vue'
+import Slider from '@/components/ui/Slider.vue'
+import WindowResizeHandles, { type ResizeDirection } from '@/components/WindowResizeHandles.vue'
 import { command, errorMessage } from '@/lib/bridge'
 import { applyAppearance } from '@/lib/theme'
+import { openExternalLink } from '@/lib/utils'
 import { coalescedTask } from '@/lib/coalescedTask'
 import type { ActionSession, PublicSettings } from '@/types'
 import './action.css'
@@ -28,11 +31,6 @@ const scroll = ref<HTMLElement | null>(null)
 const showOpacityPopup = ref(false)
 const autoScroll = ref(true)
 const listenEvent = useAppEvents()
-const resizeDirections = [
-  'north', 'north-east', 'east', 'south-east',
-  'south', 'south-west', 'west', 'north-west',
-] as const
-type ResizeDirection = (typeof resizeDirections)[number]
 let footerTimer: number | undefined
 let copyTimer: number | undefined
 let footerHideAt = 0
@@ -86,6 +84,7 @@ async function copyText(text: string, type: 'original' | 'result'): Promise<void
 }
 
 async function togglePin(): Promise<void> {
+  showOpacityPopup.value = false
   pinned.value = !pinned.value
   pinned.value = await command<boolean>('window_control', { operation: 'pin', value: pinned.value })
 }
@@ -111,18 +110,16 @@ function onScroll(): void {
   autoScroll.value = Math.abs(scroll.value.scrollHeight - scroll.value.scrollTop - scroll.value.clientHeight) < 32
 }
 
-function openResultLink(event: MouseEvent): void {
-  const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href]')
-  if (!anchor) return
-  event.preventDefault()
-  void command('open_target', { target: anchor.href })
-}
-
 function onKeydown(event: KeyboardEvent): void {
   if (event.ctrlKey || event.metaKey || event.altKey) return
   const key = event.key.toLowerCase()
-  if (key === 'escape') void stopOrClose()
-  else if (key === 'r') void regenerate()
+  if (key === 'escape') {
+    if (showOpacityPopup.value) {
+      showOpacityPopup.value = false
+      return
+    }
+    void stopOrClose()
+  } else if (key === 'r') void regenerate()
   else if (key === 'c' && !loading.value) void copyText(result.value, 'result')
   revealFooter()
 }
@@ -191,7 +188,7 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="action-window" :style="{ opacity: opacity / 100 }" @mousemove="revealFooter" @mousedown="showOpacityPopup = false">
-    <div v-for="direction in resizeDirections" :key="direction" :class="['resize-handle', `resize-${direction}`]" @mousedown.left.prevent.stop="startWindowResize(direction)" />
+    <WindowResizeHandles position="absolute" z-class="z-50" @resize="startWindowResize" />
     <header class="action-titlebar" :class="{ focused }" @mousedown.left="startWindowDrag">
       <span class="title-icon"><AppIcon :name="session?.action.icon ?? 'sparkles'" :size="14" /></span>
       <div class="title">{{ session?.action.name ?? 'CitrI' }}</div>
@@ -199,7 +196,7 @@ onBeforeUnmount(() => {
         <button type="button" title="置顶" :class="{ active: pinned }" @click="togglePin"><AppIcon name="pin" :size="13" /></button>
         <div class="opacity-wrap">
           <button type="button" title="透明度" @click="showOpacityPopup = !showOpacityPopup"><AppIcon name="droplet" :size="13" /></button>
-          <div class="opacity-popup" :class="{ hidden: !showOpacityPopup }"><span>{{ opacity }}%</span><input v-model.number="opacity" type="range" min="20" max="100" @change="showOpacityPopup = false" /></div>
+          <div class="opacity-popup" :class="{ open: showOpacityPopup }" :aria-hidden="!showOpacityPopup" :inert="!showOpacityPopup" @mousedown.stop><span>{{ opacity }}%</span><Slider v-model="opacity" :min="20" :max="100" :step="1" class="min-w-0 flex-1" @change="showOpacityPopup = false" /></div>
         </div>
         <button type="button" title="最小化" @click="command('window_control', { operation: 'minimize' })"><AppIcon name="minus" :size="13" /></button>
         <button class="close" type="button" title="关闭" @click="command('window_control', { operation: 'close' })"><AppIcon name="x" :size="13" /></button>
@@ -223,7 +220,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </section>
-      <article v-if="result" class="result markdown" v-html="renderedResult" @click="openResultLink" />
+      <article v-if="result" class="result markdown" v-html="renderedResult" @click="openExternalLink" />
       <div v-if="error" class="result-error">{{ error }}</div>
       <div class="footer-spacer" />
     </section>

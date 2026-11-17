@@ -1,3 +1,5 @@
+mod db;
+mod queries;
 mod store;
 
 use crate::{constants::clamp_history_limit, models::HistoryEntry};

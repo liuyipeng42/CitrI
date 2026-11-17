@@ -1,9 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, toRaw } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import AppIcon from '@/components/AppIcon.vue'
+import PasswordInput from '@/components/PasswordInput.vue'
+import Badge from '@/components/ui/Badge.vue'
+import Button from '@/components/ui/Button.vue'
+import Slider from '@/components/ui/Slider.vue'
+import ExtraParametersCard from './ExtraParametersCard.vue'
+import { parametersFromBody, readExtraBody, type ExtraParameter } from './extraParameters'
 import { command, errorMessage } from '@/lib/bridge'
-import { normalizeExtraParameterValue, type ExtraParameter, type ExtraParameterType } from '@/features/settings/api/extraParameters'
-import type { ApiProfile, JsonValue, Settings } from '@/types'
+import { cloneRaw } from '@/lib/utils'
+import type { ApiProfile, Settings } from '@/types'
 
 type StatusKind = 'normal' | 'success' | 'error'
 const settings = defineModel<Settings>({ required: true })
@@ -11,46 +17,22 @@ const emit = defineEmits<{
   status: [message: string, kind?: StatusKind]
   'draft-change': []
 }>()
+
 const testing = ref(false)
-const showKey = ref(false)
 const extraParameters = ref<ExtraParameter[]>([])
 const activeProfile = computed(() => settings.value.apiProfiles.find((profile) => profile.id === settings.value.activeApiProfileId) ?? null)
-
-function parametersFromBody(body: Record<string, JsonValue>): ExtraParameter[] {
-  return Object.entries(body).map(([key, value]) => {
-    const type: ExtraParameterType = value === null || Array.isArray(value) || typeof value === 'object'
-      ? 'json'
-      : typeof value === 'boolean'
-        ? 'boolean'
-        : typeof value === 'number' ? 'number' : 'string'
-    return { key, type, value: type === 'json' ? JSON.stringify(value) : String(value) }
-  })
-}
-
-function readExtraBody(): Record<string, JsonValue> {
-  const result: Record<string, JsonValue> = {}
-  for (const parameter of extraParameters.value) {
-    const key = parameter.key.trim()
-    if (!key) continue
-    if (Object.prototype.hasOwnProperty.call(result, key)) throw new Error(`额外请求参数名称重复：${key}`)
-    if (parameter.type === 'boolean') result[key] = parameter.value === 'true'
-    else if (parameter.type === 'number') {
-      const value = Number(parameter.value)
-      if (!parameter.value.trim() || !Number.isFinite(value)) throw new Error(`参数 ${key} 不是有效数字`)
-      result[key] = value
-    } else if (parameter.type === 'json') {
-      try { result[key] = JSON.parse(parameter.value) }
-      catch { throw new Error(`参数 ${key} 不是有效 JSON`) }
-    } else result[key] = parameter.value
-  }
-  return result
-}
 
 function commit(): ApiProfile {
   const profile = activeProfile.value
   if (!profile) throw new Error('没有可用的 API 配置')
   profile.name = profile.name.trim() || '未命名 API'
-  profile.extraBody = readExtraBody()
+  profile.apiKey = profile.apiKey.trim()
+  const rawMaxTokens = profile.maxTokens as unknown
+  const maxTokens = rawMaxTokens === '' ? Number.NaN : Number(rawMaxTokens)
+  profile.maxTokens = Number.isFinite(maxTokens) ? Math.min(128000, Math.max(1, Math.round(maxTokens))) : 2048
+  const temperature = Number(profile.temperature)
+  profile.temperature = Number.isFinite(temperature) ? Math.min(2, Math.max(0, Math.round(temperature * 10) / 10)) : 0.3
+  profile.extraBody = readExtraBody(extraParameters.value)
   return profile
 }
 
@@ -96,16 +78,10 @@ function deleteProfile(): void {
   emit('status', '已删除')
 }
 
-function addParameter(): void {
-  extraParameters.value.push({ key: '', type: 'boolean', value: 'false' })
-  emit('draft-change')
-}
-
 async function testApi(): Promise<void> {
   testing.value = true
   try {
-    const profile = JSON.parse(JSON.stringify(toRaw(commit()))) as ApiProfile
-    const result = await command<string>('test_api', { profile })
+    const result = await command<string>('test_api', { profile: cloneRaw(commit()) })
     emit('status', `连接成功：${result.slice(0, 40)}`, 'success')
   } catch (error) { emit('status', errorMessage(error), 'error') }
   finally { testing.value = false }
@@ -116,33 +92,162 @@ defineExpose({ commit, reload })
 </script>
 
 <template>
-  <section class="settings-card api-card">
-    <div class="section-title action-heading"><div><h2>API 连接</h2><span>当前配置用于所有 AI 动作</span></div><button class="secondary-button" type="button" @click="addProfile"><AppIcon name="plus" :size="14" />添加 API</button></div>
-    <div class="api-profile-layout">
-      <aside class="api-profile-sidebar"><span class="caption">API 配置</span><button v-for="profile in settings.apiProfiles" :key="profile.id" type="button" :class="['profile-button', { active: profile.id === settings.activeApiProfileId }]" @click="selectProfile(profile.id)"><AppIcon name="message-circle-question" :size="14" /><span>{{ profile.name }}</span></button></aside>
-      <div v-if="activeProfile" class="api-profile-editor">
-        <div class="profile-heading"><label class="field"><span>配置名称</span><input v-model="activeProfile.name" maxlength="50" /></label><button class="danger-icon" type="button" title="删除当前 API" :disabled="settings.apiProfiles.length <= 1" @click="deleteProfile"><AppIcon name="trash" :size="15" /></button></div>
-        <div class="field-grid">
-          <label class="field field-wide"><span>API URL</span><input v-model.trim="activeProfile.apiUrl" type="url" placeholder="https://api.openai.com/v1" spellcheck="false" /><small>可填写基础地址，或完整的 <code>/chat/completions</code> 地址</small></label>
-          <label class="field field-wide"><span>API Key</span><div class="input-with-button"><input v-model.trim="activeProfile.apiKey" :type="showKey ? 'text' : 'password'" placeholder="sk-..." autocomplete="off" spellcheck="false" /><button type="button" :title="showKey ? '隐藏 API Key' : '显示 API Key'" data-no-autosave @click="showKey = !showKey"><AppIcon :name="showKey ? 'eyeoff' : 'eye'" :size="16" /></button></div><small>仅由 Rust 后端读取并保存在本机，不会发送给工具条和结果窗口</small></label>
-          <label class="field"><span>模型</span><input v-model.trim="activeProfile.model" placeholder="gpt-4.1-mini" spellcheck="false" /></label>
-          <label class="field"><span>温度 <b>{{ activeProfile.temperature.toFixed(1) }}</b></span><input v-model.number="activeProfile.temperature" type="range" min="0" max="2" step="0.1" /></label>
-          <label class="field"><span>最大输出 Token</span><input v-model.number="activeProfile.maxTokens" type="number" min="1" max="128000" /></label>
-          <div class="field test-field"><span>连接测试</span><button class="secondary-button" type="button" :disabled="testing" data-no-autosave @click="testApi">{{ testing ? '测试中…' : '测试当前 API' }}</button></div>
-          <label class="field field-wide"><span>系统 Prompt</span><textarea v-model="activeProfile.systemPrompt" rows="3" /></label>
-          <div class="field field-wide"><div class="parameter-heading"><span>额外 API 请求参数</span><button class="secondary-button small-button" type="button" data-no-autosave @click="addParameter"><AppIcon name="plus" :size="13" />添加参数</button></div>
-            <div v-if="!extraParameters.length" class="parameter-empty">暂无额外参数</div>
-            <div v-for="(parameter, index) in extraParameters" :key="index" class="parameter-row">
-              <input v-model="parameter.key" placeholder="参数名称" spellcheck="false" />
-              <select v-model="parameter.type" @change="normalizeExtraParameterValue(parameter)"><option value="string">字符串</option><option value="boolean">布尔值</option><option value="number">数字</option><option value="json">JSON</option></select>
-              <select v-if="parameter.type === 'boolean'" v-model="parameter.value"><option value="true">true</option><option value="false">false</option></select>
-              <input v-else v-model="parameter.value" :placeholder="parameter.type === 'json' ? '{&quot;key&quot;:&quot;value&quot;}' : '参数值'" spellcheck="false" />
-              <button type="button" title="删除参数" @click="extraParameters.splice(index, 1)"><AppIcon name="trash" :size="14" /></button>
-            </div>
-            <small>用于供应商特有参数，例如 <code>enable_thinking=false</code>；核心字段会由 CitrI 覆盖。</small>
+  <div class="mx-auto flex max-w-[880px] flex-col gap-4">
+    <section class="rounded-2xl border border-border bg-card p-5 shadow-xs">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div class="flex items-center gap-2">
+            <h2 class="m-0 text-[15px] font-semibold tracking-tight text-foreground">API 与模型配置</h2>
+            <Badge variant="muted">{{ settings.apiProfiles.length }}/20</Badge>
           </div>
+          <span class="mt-1 block text-[11.5px] text-muted-foreground">当前激活的配置将用于所有 AI 动作，可随时在上方快速切换</span>
+        </div>
+        <div class="flex shrink-0 items-center gap-2">
+          <Button variant="secondary" :disabled="testing" data-no-autosave @click="testApi">
+            <span v-if="testing" class="spinner h-3.5 w-3.5" />
+            <AppIcon v-else name="sparkles" :size="14" />
+            {{ testing ? '测试中…' : '测试当前 API' }}
+          </Button>
+          <Button variant="default" @click="addProfile">
+            <AppIcon name="plus" :size="14" />添加配置
+          </Button>
         </div>
       </div>
-    </div>
-  </section>
+
+      <div class="mt-4 flex flex-wrap gap-2 rounded-xl border border-border/80 bg-secondary/55 p-2">
+        <button
+          v-for="profile in settings.apiProfiles"
+          :key="profile.id"
+          type="button"
+          :class="[
+            'flex min-w-0 max-w-full items-center gap-2 rounded-lg border px-3 py-1.5 text-left transition-all',
+            profile.id === settings.activeApiProfileId
+              ? 'border-primary/45 bg-card text-foreground shadow-xs ring-1 ring-primary/15'
+              : 'border-transparent bg-transparent text-muted-foreground hover:border-border/70 hover:bg-card/80 hover:text-foreground',
+          ]"
+          @click="selectProfile(profile.id)"
+        >
+          <span :class="['h-2 w-2 shrink-0 rounded-full transition-colors', profile.id === settings.activeApiProfileId ? 'bg-primary' : 'bg-muted-foreground/35']" />
+          <span class="max-w-[160px] truncate text-xs font-semibold">{{ profile.name }}</span>
+          <span
+            v-if="profile.model"
+            :class="[
+              'max-w-[150px] truncate rounded px-1.5 py-0.5 font-mono text-[10.5px]',
+              profile.id === settings.activeApiProfileId ? 'bg-primary-soft text-primary' : 'bg-muted/85 text-muted-foreground',
+            ]"
+          >{{ profile.model }}</span>
+        </button>
+      </div>
+    </section>
+
+    <template v-if="activeProfile">
+      <section class="rounded-2xl border border-border bg-card p-6 shadow-xs">
+        <div class="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-border/70 pb-3.5">
+          <div class="flex items-center gap-2">
+            <h3 class="m-0 text-[14px] font-semibold tracking-tight text-foreground">连接与凭证</h3>
+            <Badge :variant="activeProfile.apiKey.trim() ? 'success' : 'secondary'">{{ activeProfile.apiKey.trim() ? '已填 Key' : '未填 Key' }}</Badge>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            title="删除当前 API"
+            :disabled="settings.apiProfiles.length <= 1"
+            class="h-8 text-xs hover:border-destructive/50 hover:bg-destructive/10 hover:text-destructive"
+            @click="deleteProfile"
+          >
+            <AppIcon name="trash" :size="13" />删除配置
+          </Button>
+        </div>
+
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <label class="flex min-w-0 flex-col gap-1.5 text-xs">
+            <span class="font-semibold text-foreground">配置名称</span>
+            <input
+              v-model="activeProfile.name"
+              maxlength="50"
+              placeholder="例如：OpenAI / DeepSeek"
+              class="h-9 w-full rounded-lg border border-border bg-background px-3 text-xs text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+            />
+          </label>
+
+          <label class="flex min-w-0 flex-col gap-1.5 text-xs">
+            <span class="font-semibold text-foreground">模型</span>
+            <input
+              v-model.trim="activeProfile.model"
+              placeholder="gpt-4.1-mini"
+              spellcheck="false"
+              class="h-9 w-full rounded-lg border border-border bg-background px-3 font-mono text-xs text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+            />
+          </label>
+
+          <label class="col-span-full flex min-w-0 flex-col gap-1.5 text-xs">
+            <span class="font-semibold text-foreground">API URL</span>
+            <input
+              v-model.trim="activeProfile.apiUrl"
+              type="url"
+              placeholder="https://api.openai.com/v1"
+              spellcheck="false"
+              class="h-9 w-full rounded-lg border border-border bg-background px-3 text-xs text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+            />
+            <small class="text-[11px] text-muted-foreground">可填写基础地址，或完整的 <code class="rounded bg-secondary px-1 py-0.5 text-primary">/chat/completions</code> 地址</small>
+          </label>
+
+          <label class="col-span-full flex min-w-0 flex-col gap-1.5 text-xs">
+            <span class="font-semibold text-foreground">API Key</span>
+            <PasswordInput
+              v-model="activeProfile.apiKey"
+              placeholder="sk-..."
+              show-title="显示 API Key"
+              hide-title="隐藏 API Key"
+            />
+            <small class="text-[11px] text-muted-foreground">仅由 Rust 后端读取并保存在本机，不会发送给工具条和结果窗口</small>
+          </label>
+        </div>
+      </section>
+
+      <section class="rounded-2xl border border-border bg-card p-6 shadow-xs">
+        <div class="mb-4 border-b border-border/70 pb-3.5">
+          <h3 class="m-0 text-[14px] font-semibold tracking-tight text-foreground">生成参数与系统 Prompt</h3>
+          <span class="mt-1 block text-[11.5px] text-muted-foreground">控制模型输出随机性、长度上限以及默认系统角色设定</span>
+        </div>
+
+        <div class="grid grid-cols-1 items-end gap-5 sm:grid-cols-[minmax(0,1fr)_220px]">
+          <div class="flex min-w-0 flex-col gap-2 text-xs">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2">
+                <span class="font-semibold text-foreground">温度</span>
+                <Badge variant="default">{{ activeProfile.temperature.toFixed(1) }}</Badge>
+              </div>
+              <span class="text-[11px] text-muted-foreground">
+                {{ activeProfile.temperature <= 0.4 ? '严谨稳定' : activeProfile.temperature <= 1.0 ? '均衡自然' : '更有创意' }}
+              </span>
+            </div>
+            <Slider v-model="activeProfile.temperature" :min="0" :max="2" :step="0.1" />
+          </div>
+
+          <label class="flex min-w-0 flex-col gap-1.5 text-xs">
+            <span class="font-semibold text-foreground">最大输出 Token</span>
+            <input
+              v-model.number="activeProfile.maxTokens"
+              type="number"
+              min="1"
+              max="128000"
+              class="h-9 w-full rounded-lg border border-border bg-background px-3 text-xs tabular-nums text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+            />
+          </label>
+        </div>
+
+        <label class="mt-4 flex min-w-0 flex-col gap-1.5 text-xs">
+          <span class="font-semibold text-foreground">系统 Prompt</span>
+          <textarea
+            v-model="activeProfile.systemPrompt"
+            rows="3"
+            class="w-full resize-y rounded-lg border border-border bg-background px-3 py-2.5 text-xs leading-relaxed text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+          />
+        </label>
+      </section>
+
+      <ExtraParametersCard v-model="extraParameters" @draft-change="emit('draft-change')" />
+    </template>
+  </div>
 </template>

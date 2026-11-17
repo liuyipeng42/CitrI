@@ -9,7 +9,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        Mutex,
+        Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -37,6 +37,14 @@ pub struct SyncStore {
 }
 
 impl SyncStore {
+    fn read_config(&self) -> MutexGuard<'_, SyncConfig> {
+        self.value.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_config(&self) -> Result<MutexGuard<'_, SyncConfig>, String> {
+        self.value.lock().map_err(|_| "同步配置存储已损坏".into())
+    }
+
     pub fn load(path: PathBuf, settings: &Settings, modified_at: u64) -> Self {
         let mut value: SyncConfig = fs::read(&path)
             .ok()
@@ -62,37 +70,25 @@ impl SyncStore {
     }
 
     pub fn preferences(&self) -> SyncPreferences {
-        self.value
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .preferences
-            .clone()
+        self.read_config().preferences.clone()
     }
+
     pub fn status(&self) -> SyncStatus {
         let mut status = self
             .status
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        status.last_synced_at = self
-            .value
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .last_synced_at;
+        status.last_synced_at = self.read_config().last_synced_at;
         status
     }
+
     pub fn modified_at(&self) -> u64 {
-        self.value
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .settings_modified_at
+        self.read_config().settings_modified_at
     }
+
     pub fn first_sync(&self) -> bool {
-        self.value
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .last_synced_at
-            == 0
+        self.read_config().last_synced_at == 0
     }
 
     fn persist(&self, value: &SyncConfig) -> Result<(), String> {
@@ -116,7 +112,7 @@ impl SyncStore {
         if !preferences.url.is_empty() {
             dav_directory_url(&preferences.url)?;
         }
-        let mut current = self.value.lock().map_err(|_| "同步配置存储已损坏")?;
+        let mut current = self.lock_config()?;
         let mut next = current.clone();
         let connection_changed = next.preferences.url != preferences.url
             || next.preferences.username != preferences.username;
@@ -140,7 +136,7 @@ impl SyncStore {
 
     pub fn note_settings(&self, settings: &Settings) -> Result<(), String> {
         let hash = settings_hash(settings);
-        let mut current = self.value.lock().map_err(|_| "同步配置存储已损坏")?;
+        let mut current = self.lock_config()?;
         if current.settings_hash == hash {
             return Ok(());
         }
@@ -161,7 +157,7 @@ impl SyncStore {
         modified_at: u64,
         synced: bool,
     ) -> Result<(), String> {
-        let mut current = self.value.lock().map_err(|_| "同步配置存储已损坏")?;
+        let mut current = self.lock_config()?;
         let mut next = current.clone();
         next.settings_hash = settings_hash(settings);
         next.settings_modified_at = modified_at;
@@ -174,7 +170,7 @@ impl SyncStore {
     }
 
     pub fn probe_etag(&self, history_revision: u64) -> Option<String> {
-        let value = self.value.lock().unwrap_or_else(|e| e.into_inner());
+        let value = self.read_config();
         (!value.remote_etag.is_empty()
             && value.synced_settings_hash == value.settings_hash
             && value.synced_history_revision == history_revision
@@ -183,7 +179,7 @@ impl SyncStore {
     }
 
     pub fn remember_remote(&self, etag: String, history_revision: u64) -> Result<(), String> {
-        let mut value = self.value.lock().map_err(|_| "同步配置存储已损坏")?;
+        let mut value = self.lock_config()?;
         let mut next = value.clone();
         next.remote_etag = etag;
         next.synced_settings_hash = next.settings_hash.clone();
@@ -195,10 +191,7 @@ impl SyncStore {
     }
 
     pub fn checked(&self) {
-        self.value
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .last_synced_at = now_millis();
+        self.read_config().last_synced_at = now_millis();
     }
 
     pub fn request_sync(&self) {
@@ -215,11 +208,7 @@ impl SyncStore {
     }
 
     pub fn set_status(&self, busy: bool, message: String, error: String) -> SyncStatus {
-        let last_synced_at = self
-            .value
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .last_synced_at;
+        let last_synced_at = self.read_config().last_synced_at;
         let status = SyncStatus {
             busy,
             last_synced_at,

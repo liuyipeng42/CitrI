@@ -1,62 +1,175 @@
+@import "tailwindcss";
+
 :root {
   color-scheme: light dark;
   --background: #f5f6f8;
   --card: #ffffff;
   --popover: #ffffff;
-  --foreground: #18191c;
-  --muted: #eef0f4;
-  --muted-foreground: #686d76;
-  --secondary: #f3f4f7;
-  --accent: #e9ecf1;
-  --border: #e1e4eb;
+  --foreground: #18181b;
+  --muted: #eceef2;
+  --muted-foreground: #71717a;
+  --secondary: #f4f4f5;
+  --accent: #e4e4e7;
+  --border: #e4e4e7;
   --primary: #f97316;
   --primary-soft: #fff2e8;
-  --error: #dc3545;
-  --success: #22a06b;
-  --link: #1677ff;
-  --shadow-sm: 0 1px 3px rgba(15, 18, 24, 0.05), 0 1px 2px rgba(15, 18, 24, 0.03);
-  --shadow: 0 10px 28px rgba(15, 18, 24, 0.12), 0 2px 6px rgba(15, 18, 24, 0.06);
+  --error: #dc2626;
+  --success: #16a34a;
+  --link: #2563eb;
+  --shadow-sm: 0 1px 2px rgba(15, 18, 24, 0.04), 0 1px 3px rgba(15, 18, 24, 0.03);
+  --shadow: 0 12px 32px rgba(15, 18, 24, 0.14), 0 2px 8px rgba(15, 18, 24, 0.06);
   --font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-scale: 1;
-  font-family: var(--font);
-  color: var(--foreground);
-  background: var(--background);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #141518;
-    --card: #1d1f24;
-    --popover: #1f2127;
-    --foreground: #eceef2;
-    --muted: #282b32;
-    --muted-foreground: #969ba6;
-    --secondary: #23262c;
-    --accent: #2f333b;
-    --border: #343842;
+    --background: #09090b;
+    --card: #18181b;
+    --popover: #18181b;
+    --foreground: #fafafa;
+    --muted: #27272a;
+    --muted-foreground: #a1a1aa;
+    --secondary: #202024;
+    --accent: #27272a;
+    --border: #27272a;
     --primary-soft: #4a2b18;
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.28);
-    --shadow: 0 12px 32px rgba(0, 0, 0, 0.46), 0 2px 8px rgba(0, 0, 0, 0.28);
+    --error: #ef4444;
+    --success: #22c55e;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    --shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.3);
   }
 }
 
-* { box-sizing: border-box; }
-html, body, #app { margin: 0; min-width: 0; min-height: 100%; }
-body { font-size: calc(14px * var(--font-scale)); }
-button, input, textarea, select { font: inherit; color: inherit; }
-button { cursor: pointer; transition: background-color .15s ease, color .15s ease, border-color .15s ease, opacity .15s ease, transform .1s ease; }
-button:active:not(:disabled) { transform: translateY(.5px); }
-button:disabled { cursor: not-allowed; opacity: .48; }
-input, textarea, select { outline: none; transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease; }
-input:focus, textarea:focus, select:focus { border-color: var(--primary) !important; box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary), transparent 85%); }
+@theme inline {
+  --color-background: var(--background);
+  --color-card: var(--card);
+  --color-popover: var(--popover);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-secondary: var(--secondary);
+  --color-accent: var(--accent);
+  --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-primary-soft: var(--primary-soft);
+  --color-destructive: var(--error);
+  --color-success: var(--success);
+  --color-link: var(--link);
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    border-color: var(--border);
+  }
+
+  html, body, #app {
+    margin: 0;
+    min-width: 0;
+    min-height: 100%;
+  }
+
+  body {
+    font-family: var(--font);
+    font-size: calc(14px * var(--font-scale));
+    color: var(--foreground);
+    background: var(--background);
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button, input, textarea, select {
+    font: inherit;
+    color: inherit;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+}
+
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { border-radius: 999px; background: color-mix(in srgb, var(--muted-foreground), transparent 62%); }
-::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--muted-foreground), transparent 38%); }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--muted-foreground), transparent 36%); }
 .hidden { display: none !important; }
-.icon-button { display: inline-flex; align-items: center; justify-content: center; border: 0; background: transparent; }
 .spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin .75s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+@keyframes citri-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes citri-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes citri-panel-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes citri-pop-in {
+  from { opacity: 0; transform: scale(.96) translateY(5px); }
+}
+
+@keyframes citri-dialog-in {
+  from { opacity: 0; scale: .96; }
+  to { opacity: 1; scale: 1; }
+}
+
+@keyframes citri-dialog-out {
+  from { opacity: 1; scale: 1; }
+  to { opacity: 0; scale: .96; }
+}
+
+@keyframes citri-toolbar-in {
+  from { opacity: 0; transform: translateY(4px) scale(.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.animate-panel-in {
+  animation: citri-panel-enter .2s cubic-bezier(.22, 1, .36, 1) backwards;
+}
+
+.animate-pop-in {
+  animation: citri-pop-in .18s cubic-bezier(.22, 1, .36, 1) backwards;
+}
+
+.citri-dialog-overlay[data-state="open"] {
+  animation: citri-fade-in .16s ease-out both;
+}
+
+.citri-dialog-overlay[data-state="closed"] {
+  animation: citri-fade-out .12s ease-in both;
+}
+
+.citri-dialog-content[data-state="open"] {
+  animation: citri-dialog-in .2s cubic-bezier(.22, 1, .36, 1) both;
+}
+
+.citri-dialog-content[data-state="closed"] {
+  animation: citri-dialog-out .14s ease-in both;
+}
+
+.citri-select-content[data-state="open"] {
+  animation: citri-pop-in .15s cubic-bezier(.22, 1, .36, 1) backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-panel-in,
+  .animate-pop-in,
+  .citri-dialog-overlay[data-state],
+  .citri-dialog-content[data-state],
+  .citri-select-content[data-state] {
+    animation: none !important;
+  }
+}

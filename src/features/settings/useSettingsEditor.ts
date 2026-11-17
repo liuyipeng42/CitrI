@@ -1,8 +1,9 @@
-import { nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAppEvents } from '@/lib/events'
 import type ApiSettings from './api/ApiSettings.vue'
 import { command, errorMessage } from '@/lib/bridge'
 import { applyAppearance } from '@/lib/theme'
+import { cloneRaw } from '@/lib/utils'
 import type { PlatformInfo, Settings } from '@/types'
 
 export function useSettingsEditor() {
@@ -105,8 +106,8 @@ export function useSettingsEditor() {
         try {
           apiSettings.value?.commit()
           settings.value.filterList = filterListText.value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)
-          const payload = JSON.parse(JSON.stringify(toRaw(settings.value))) as Settings
-          const saved = await command<Settings>('save_settings', { settings: payload })
+          const payload: Settings = cloneRaw(settings.value)
+          const saved: Settings = await command<Settings>('save_settings', { settings: payload })
 
           // A newer edit may arrive while Rust is writing the previous snapshot.
           // Never replace that newer local state with an older response.

@@ -174,6 +174,12 @@ pub(super) async fn run_sync(
 
 const AUTO_SYNC_DEBOUNCE: Duration = Duration::from_millis(800);
 
+fn ready_to_auto_sync(state: &AppState) -> bool {
+    !state.sync.preferences().url.is_empty()
+        && !state.sync_editing.load(Ordering::Acquire)
+        && !state.sync.status().busy
+}
+
 pub fn start_auto_sync(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -181,12 +187,7 @@ pub fn start_auto_sync(app: tauri::AppHandle) {
             if state.is_quitting() {
                 break;
             }
-            let preferences = state.sync.preferences();
-            if preferences.url.is_empty()
-                || state.sync_editing.load(Ordering::Acquire)
-                || state.sync.status().busy
-                || !state.sync.has_pending()
-            {
+            if !ready_to_auto_sync(&state) || !state.sync.has_pending() {
                 state.sync.wake.notified().await;
                 continue;
             }
@@ -197,12 +198,7 @@ pub fn start_auto_sync(app: tauri::AppHandle) {
             if state.is_quitting() {
                 break;
             }
-            let preferences = state.sync.preferences();
-            if preferences.url.is_empty()
-                || state.sync_editing.load(Ordering::Acquire)
-                || state.sync.status().busy
-                || !state.sync.take_pending()
-            {
+            if !ready_to_auto_sync(&state) || !state.sync.take_pending() {
                 continue;
             }
             let _ = run_sync(&app, &state, None).await;

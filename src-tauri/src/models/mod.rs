@@ -1,5 +1,6 @@
 mod actions;
 mod history;
+mod sanitize;
 mod settings;
 mod sync;
 mod windows;
