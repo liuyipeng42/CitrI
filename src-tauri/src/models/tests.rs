@@ -8,8 +8,13 @@ fn sanitizes_ranges_and_active_profile() {
         action_window_width: 100,
         action_window_height: 5000,
         font_size: 250,
+        filter_list: vec![" Chrome.exe ".into(), "chrome.exe".into()],
         ..Settings::default()
     };
+    value.actions.push(ActionItem {
+        id: "copy".into(),
+        ..ActionItem::default()
+    });
     value.api_profiles.push(ApiProfile {
         id: "second".into(),
         api_url: " https://example.com/v1 ".into(),
@@ -23,6 +28,9 @@ fn sanitizes_ranges_and_active_profile() {
     assert_eq!(value.font_size, 125);
     assert_eq!(value.accent_color, AccentColor::Orange);
     assert_eq!(value.filter_mode, FilterMode::Default);
+    assert_eq!(value.filter_list, vec!["chrome.exe"]);
+    assert_eq!(value.actions.last().unwrap().id, "copy-2");
+    assert!(!value.actions.last().unwrap().built_in);
     assert_eq!(value.active_profile().api_url, "https://example.com/v1");
 }
 

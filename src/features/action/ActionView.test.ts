@@ -40,6 +40,11 @@ it('renders streamed Markdown and flushes the final chunk on completion', async 
     expect(root.querySelector('.result strong')?.textContent).toBe('重点')
     expect(root.querySelector('.result pre code.language-ts')?.textContent).toContain('const n = 1')
     expect(root.querySelector('.generating')).toBeNull()
+    bridge.listeners.get('assistant-delta')!({ payload: '\n\n不应追加的其它窗口内容' })
+    await vi.advanceTimersByTimeAsync(50)
+    await flush()
+    expect(root.querySelector('.result')?.textContent).not.toContain('不应追加')
+    expect(root.querySelector('.generating')).toBeNull()
   } finally {
     app.unmount()
     root.remove()

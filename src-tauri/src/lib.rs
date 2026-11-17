@@ -4,6 +4,7 @@ mod constants;
 mod data;
 mod desktop;
 mod history;
+mod http;
 mod models;
 mod selection;
 mod settings;

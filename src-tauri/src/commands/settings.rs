@@ -32,6 +32,7 @@ pub async fn save_settings(
     let history_revision = state.history.revision();
     state.history.set_limit(settings.history_limit)?;
     if state.history.revision() != history_revision {
+        state.sync.request_sync();
         let _ = app.emit_to("settings", "history-changed", ());
     }
     Ok(settings)

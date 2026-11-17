@@ -52,6 +52,20 @@ fn shrinking_and_disabling_are_persisted_and_invalidate_pending_requests() {
             .append(store.begin().unwrap(), entry(HistoryStatus::Success))
             .unwrap();
     }
+    let pending = store.begin().unwrap();
+    let preserved_in_flight = store.begin().unwrap();
+    store.set_limit(2).unwrap();
+    store
+        .append(preserved_in_flight, entry(HistoryStatus::Success))
+        .unwrap();
+    assert_eq!(
+        HistoryStore::load(path.clone(), 2)
+            .unwrap()
+            .begin()
+            .unwrap()
+            .id,
+        6
+    );
     store.set_limit(1).unwrap();
     assert_eq!(
         HistoryStore::load(path.clone(), 1)
@@ -61,7 +75,6 @@ fn shrinking_and_disabling_are_persisted_and_invalidate_pending_requests() {
             .len(),
         1
     );
-    let pending = store.begin().unwrap();
     store.set_limit(0).unwrap();
     assert!(store.begin().is_none());
     store.set_limit(10).unwrap();

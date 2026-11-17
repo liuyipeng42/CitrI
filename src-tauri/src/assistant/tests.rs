@@ -113,6 +113,6 @@ async fn streamed_failures_and_cancellation_keep_partial_content_without_a_secon
     let response =
         stream_chat_completion(&profile, "hello", &cancellation, |_| cancellation.cancel()).await;
     assert_eq!(response.content, "partial");
-    assert_eq!(response.error.as_deref(), Some("__CANCELLED__"));
+    assert_eq!(response.error.as_deref(), Some(CANCELLED));
     server.join().unwrap();
 }

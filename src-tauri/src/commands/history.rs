@@ -46,6 +46,7 @@ pub async fn clear_history(window: WebviewWindow, app: tauri::AppHandle) -> Resu
         let state = app.state::<AppState>();
         let _data_guard = state.lock_data()?;
         state.history.clear()?;
+        state.sync.request_sync();
         let _ = app.emit_to("settings", "history-changed", ());
         Ok(())
     })

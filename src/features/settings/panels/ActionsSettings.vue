@@ -20,8 +20,9 @@ function moveAction(index: number, delta: number): void {
 }
 
 function addAction(): void {
+  if (settings.value.actions.length >= 20) return
   settings.value.actions.push({
-    id: `custom-${Date.now()}`,
+    id: `custom-${Date.now()}-${settings.value.actions.length + 1}`,
     name: '自定义', icon: 'sparkles', enabled: true, builtIn: false,
     prompt: '请处理下面的文本：\n\n{{text}}',
   })
@@ -34,7 +35,7 @@ function removeAction(index: number): void {
 
 <template>
   <section class="settings-card">
-    <div class="section-title action-heading"><div><h2>动作与提示词</h2><span>自定义工具条按钮，让 AI 按你的要求处理选中文本</span></div><button class="secondary-button" type="button" @click="addAction"><AppIcon name="plus" :size="14" />添加自定义动作</button></div>
+    <div class="section-title action-heading"><div><h2>动作与提示词</h2><span>自定义工具条按钮，让 AI 按你的要求处理选中文本</span></div><button class="secondary-button" type="button" :disabled="settings.actions.length >= 20" @click="addAction"><AppIcon name="plus" :size="14" />添加自定义动作</button></div>
     <p class="action-hint">不限于翻译、总结等预设功能。点击“添加自定义动作”，填写名称和提示词，即可创建润色、纠错、提取待办等 AI 功能。图标只影响按钮外观，不决定功能。</p>
     <p class="action-hint">提示词示例：请将下面的文本改写为礼貌、简洁的邮件：<code v-pre>{{text}}</code>。其中 <code v-pre>{{text}}</code> 会替换为选中的文本。自定义动作使用当前 API 配置。</p>
     <div class="actions-list">

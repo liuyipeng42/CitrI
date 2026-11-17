@@ -1,4 +1,3 @@
-use super::require_window;
 use tauri::WebviewWindow;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
@@ -8,7 +7,10 @@ pub fn clipboard_write(
     app: tauri::AppHandle,
     text: String,
 ) -> Result<(), String> {
-    if !window.label().starts_with("action-") && window.label() != "toolbar" {
+    if !window.label().starts_with("action-")
+        && window.label() != "toolbar"
+        && window.label() != "settings"
+    {
         return Err("当前窗口无权写入剪贴板".into());
     }
     app.clipboard()
@@ -18,7 +20,9 @@ pub fn clipboard_write(
 
 #[tauri::command]
 pub fn open_target(window: WebviewWindow, target: String) -> Result<(), String> {
-    require_window(&window, "action")?;
+    if !window.label().starts_with("action-") && window.label() != "settings" {
+        return Err("当前窗口无权执行此操作".into());
+    }
     let parsed = reqwest::Url::parse(&target).map_err(|_| "链接格式不正确".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("只允许打开 HTTP 或 HTTPS 链接".into());

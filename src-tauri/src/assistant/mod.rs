@@ -2,7 +2,7 @@ mod protocol;
 
 use crate::models::ApiProfile;
 use futures_util::StreamExt;
-pub use protocol::{ChatCompletion, ChatDelta};
+pub use protocol::{CANCELLED, ChatCompletion, ChatDelta};
 use protocol::{
     ChatResponse, append_delta, check_api_error, extract_delta, next_sse_block, parse_sse_block,
     require_response_text,
@@ -12,21 +12,17 @@ use serde_json::{Value, json};
 use std::{sync::OnceLock, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-static API_CLIENT: OnceLock<Client> = OnceLock::new();
+/// Upper bound for a single, still incomplete SSE event.
+const MAX_PENDING_EVENT_BYTES: usize = 2 * 1024 * 1024;
 
 fn api_client() -> Result<&'static Client, String> {
-    if let Some(client) = API_CLIENT.get() {
-        return Ok(client);
-    }
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(300))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let _ = API_CLIENT.set(client);
-    Ok(API_CLIENT
-        .get()
-        .expect("API client must be initialized after a successful build"))
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    crate::http::shared_client(&CLIENT, || {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(300))
+            .build()
+    })
 }
 
 pub fn normalize_chat_completions_url(value: &str) -> Result<String, String> {
@@ -120,7 +116,7 @@ async fn stream_into(
         .header(header::ACCEPT, "text/event-stream, application/json")
         .json(&request_body(profile, prompt));
     let response = tokio::select! {
-        _ = cancellation.cancelled() => return Err("__CANCELLED__".into()),
+        _ = cancellation.cancelled() => return Err(CANCELLED.into()),
         response = request.send() => response.map_err(|error| format!("API 请求失败：{error}"))?,
     };
     let status = response.status();
@@ -154,7 +150,7 @@ async fn stream_into(
 
     if !content_type.contains("text/event-stream") {
         let payload: Value = tokio::select! {
-            _ = cancellation.cancelled() => return Err("__CANCELLED__".into()),
+            _ = cancellation.cancelled() => return Err(CANCELLED.into()),
             payload = response.json() => payload.map_err(|error| format!("API 响应格式错误：{error}"))?,
         };
         check_api_error(&payload)?;
@@ -166,19 +162,16 @@ async fn stream_into(
     let mut buffer = Vec::new();
     loop {
         let next = tokio::select! {
-            _ = cancellation.cancelled() => return Err("__CANCELLED__".into()),
+            _ = cancellation.cancelled() => return Err(CANCELLED.into()),
             next = stream.next() => next,
         };
         let Some(chunk) = next else {
             break;
         };
         buffer.extend_from_slice(&chunk.map_err(|error| format!("API 流读取失败：{error}"))?);
-        if buffer.len() > 2 * 1024 * 1024 {
-            return Err("API 流中的单个事件过大".into());
-        }
         while let Some(block) = next_sse_block(&mut buffer) {
             if cancellation.is_cancelled() {
-                return Err("__CANCELLED__".into());
+                return Err(CANCELLED.into());
             }
             let block =
                 String::from_utf8(block).map_err(|_| "API 流不是有效 UTF-8 文本".to_string())?;
@@ -187,6 +180,11 @@ async fn stream_into(
                 return require_response_text(result);
             }
             append_delta(result, delta, &mut on_delta);
+        }
+        // Only the unfinished remainder counts: one network chunk may carry
+        // many complete events.
+        if buffer.len() > MAX_PENDING_EVENT_BYTES {
+            return Err("API 流中的单个事件过大".into());
         }
     }
     if !buffer.iter().all(u8::is_ascii_whitespace) {

@@ -57,7 +57,7 @@ function selectPage(next: Page): void {
 
     <section class="settings-content">
       <header class="page-header" :class="{ 'history-page-header': page === 'history' }">
-        <div><h1>{{ currentPage.title }}</h1><p v-if="page !== 'history'">{{ currentPage.description }}</p></div>
+        <div><h1>{{ currentPage.title }}</h1><p>{{ currentPage.description }}</p></div>
         <div class="header-actions"><span class="save-status" :class="statusKind">{{ status }}</span></div>
       </header>
 

@@ -91,8 +91,7 @@ pub(super) fn capture_selection(
         position_toolbar(&ui_app, points);
         let _ = ui_app.emit_to("toolbar", "selection-selected", payload);
         if let Some(toolbar) = ui_app.get_webview_window("toolbar") {
-            let _ = toolbar.show();
-            let _ = toolbar.set_always_on_top(true);
+            super::toolbar::show_toolbar(&toolbar);
         }
     });
 }

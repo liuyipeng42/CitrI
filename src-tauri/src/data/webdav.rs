@@ -2,7 +2,18 @@ use super::archive::MAX_ARCHIVE_BYTES;
 use crate::models::SyncPreferences;
 use futures_util::StreamExt;
 use reqwest::{Client, Method, StatusCode, Url, header};
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
+
+fn dav_client() -> Result<&'static Client, String> {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    crate::http::shared_client(&CLIENT, || {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+    })
+}
 
 pub fn dav_directory_url(raw: &str) -> Result<Url, String> {
     let mut url = Url::parse(raw.trim()).map_err(|_| "WebDAV 地址格式不正确".to_string())?;
@@ -23,7 +34,7 @@ pub fn dav_directory_url(raw: &str) -> Result<Url, String> {
 }
 
 pub struct DavClient {
-    client: Client,
+    client: &'static Client,
     directory: Url,
     file: Url,
     preferences: SyncPreferences,
@@ -50,14 +61,8 @@ impl DavClient {
         let file = directory
             .join("citri-sync.zip")
             .map_err(|e| e.to_string())?;
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(60))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| e.to_string())?;
         Ok(Self {
-            client,
+            client: dav_client()?,
             directory,
             file,
             preferences,
@@ -138,8 +143,12 @@ impl DavClient {
         {
             return Err("远端同步包超过 64 MB".into());
         }
+        let capacity = response
+            .content_length()
+            .unwrap_or(0)
+            .min(MAX_ARCHIVE_BYTES as u64) as usize;
         let mut stream = response.bytes_stream();
-        let mut bytes = Vec::new();
+        let mut bytes = Vec::with_capacity(capacity);
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| format!("下载同步数据失败：{e}"))?;
             if bytes.len().saturating_add(chunk.len()) > MAX_ARCHIVE_BYTES {

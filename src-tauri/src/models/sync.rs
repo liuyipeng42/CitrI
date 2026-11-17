@@ -1,29 +1,14 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, Default)]
 #[serde(rename_all = "camelCase", default)]
 #[ts(export)]
 pub struct SyncPreferences {
     pub url: String,
     pub username: String,
     pub password: String,
-    pub auto_sync: bool,
-    pub interval_minutes: u32,
     pub include_api_keys: bool,
-}
-
-impl Default for SyncPreferences {
-    fn default() -> Self {
-        Self {
-            url: String::new(),
-            username: String::new(),
-            password: String::new(),
-            auto_sync: false,
-            interval_minutes: 5,
-            include_api_keys: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, TS, Default)]

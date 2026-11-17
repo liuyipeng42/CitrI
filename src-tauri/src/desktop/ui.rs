@@ -11,9 +11,7 @@ pub fn apply_settings(app: &tauri::AppHandle, settings: &Settings) {
         let _ = toggle.set_checked(settings.enabled);
     }
     let public = crate::models::PublicSettings::from(settings);
-    for (_, window) in app.webview_windows() {
-        let _ = window.emit("settings-changed", &public);
-    }
+    let _ = app.emit("settings-changed", &public);
 }
 
 pub fn show_settings(app: &tauri::AppHandle) {

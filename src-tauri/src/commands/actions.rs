@@ -1,10 +1,10 @@
 use super::require_window;
 use crate::{
-    assistant::{compose_prompt, response_system_prompt, stream_chat_completion},
+    assistant::{CANCELLED, compose_prompt, response_system_prompt, stream_chat_completion},
+    history::now_millis,
     models::{ActionSession, HistoryEntry, HistoryStatus},
     state::{AppState, RequestHandle},
 };
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, WebviewWindow};
 use tokio_util::sync::CancellationToken;
 
@@ -38,10 +38,7 @@ pub async fn assistant_start(
     let profile = state.settings.active_profile();
     let prompt = compose_prompt(&session.action.prompt, &session.selected_text);
     let history_ticket = state.history.begin();
-    let created_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let created_at = now_millis();
     let request_id = state.next_request_id();
     let cancellation = CancellationToken::new();
     if let Some(previous) = state.replace_request(
@@ -56,21 +53,25 @@ pub async fn assistant_start(
     let result = stream_chat_completion(&profile, &prompt, &cancellation, |delta| {
         if state.request_is_current(&label, request_id) {
             if !delta.reasoning.is_empty() {
-                let _ = window.emit("assistant-reasoning", delta.reasoning);
+                let _ = window.emit_to(label.as_str(), "assistant-reasoning", delta.reasoning);
             }
             if !delta.content.is_empty() {
-                let _ = window.emit("assistant-delta", delta.content);
+                let _ = window.emit_to(label.as_str(), "assistant-delta", delta.content);
             }
         }
     })
     .await;
     // Stopped, replaced and closed windows still retain their partial response.
     // Only the active request may emit completion events to its result window.
+    let cancelled = result.error.as_deref() == Some(CANCELLED);
+    let error = (!cancelled).then_some(result.error).flatten();
     if let Some(ticket) = history_ticket {
-        let status = match result.error.as_deref() {
-            None => HistoryStatus::Success,
-            Some("__CANCELLED__") => HistoryStatus::Cancelled,
-            Some(_) => HistoryStatus::Error,
+        let status = if cancelled {
+            HistoryStatus::Cancelled
+        } else if error.is_some() {
+            HistoryStatus::Error
+        } else {
+            HistoryStatus::Success
         };
         let system_prompt = response_system_prompt(&profile);
         let entry = HistoryEntry {
@@ -85,11 +86,7 @@ pub async fn assistant_start(
             system_prompt,
             result: result.content,
             status,
-            error: if status == HistoryStatus::Error {
-                result.error.clone()
-            } else {
-                None
-            },
+            error: error.clone(),
         };
         let save_history = || {
             let _data_guard = state.lock_data()?;
@@ -97,6 +94,7 @@ pub async fn assistant_start(
         };
         match save_history() {
             Ok(true) => {
+                state.sync.request_sync();
                 let _ = app.emit_to("settings", "history-changed", ());
             }
             Ok(false) => {}
@@ -108,12 +106,10 @@ pub async fn assistant_start(
     if !state.finish_request(&label, request_id) {
         return Ok(());
     }
-    if result.error.as_deref() == Some("__CANCELLED__") {
-        let _ = window.emit("assistant-done", ());
-    } else if let Some(error) = result.error {
-        let _ = window.emit("assistant-error", error);
+    if let Some(error) = error {
+        let _ = window.emit_to(label.as_str(), "assistant-error", error);
     } else {
-        let _ = window.emit("assistant-done", ());
+        let _ = window.emit_to(label.as_str(), "assistant-done", ());
     }
     Ok(())
 }
@@ -126,7 +122,7 @@ pub fn assistant_stop(
     require_window(&window, "action")?;
     if let Some(request) = state.remove_request(window.label()) {
         request.cancellation.cancel();
-        let _ = window.emit("assistant-done", ());
+        let _ = window.emit_to(window.label(), "assistant-done", ());
     }
     Ok(())
 }

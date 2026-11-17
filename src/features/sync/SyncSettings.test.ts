@@ -28,7 +28,7 @@ async function open(): Promise<void> { app = createApp(SettingsView); app.mount(
 beforeEach(() => {
   root = document.createElement('div'); document.body.append(root)
   settings = { enabled: true, apiProfiles: [{ id: 'default', name: '默认', apiUrl: '', apiKey: '', model: 'test', systemPrompt: '', temperature: 0.3, maxTokens: 100, extraBody: {} }], activeApiProfileId: 'default', compact: false, followToolbar: true, autoClose: true, autoPin: false, rememberActionWindowSize: false, actionWindowWidth: 500, actionWindowHeight: 400, actionOpacity: 100, fontSize: 100, historyLimit: 100, accentColor: 'orange', customAccentColor: '#f97316', searchUrl: '', filterMode: 'default', filterList: [], actions: [] }
-  info = { directory: 'C:/test/citri', historyCount: 3, preferences: { url: 'https://dav.example.com/CitrI/', username: 'user', password: 'test-password', autoSync: false, intervalMinutes: 5, includeApiKeys: false }, status: { busy: false, lastSyncedAt: 0, message: '', error: '' } }
+  info = { directory: 'C:/test/citri', historyCount: 3, preferences: { url: 'https://dav.example.com/CitrI/', username: 'user', password: 'test-password', includeApiKeys: false }, status: { busy: false, lastSyncedAt: 0, message: '', error: '' } }
   bridge.listeners.clear()
   bridge.command.mockReset().mockImplementation(async (name: string) => {
     if (name === 'get_settings') return structuredClone(settings)

@@ -1,18 +1,22 @@
 .markdown { line-height: 1.65; overflow-wrap: anywhere; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
 .markdown p { margin: 0 0 10px; }
 .markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 { margin: 14px 0 8px; line-height: 1.35; }
-.markdown h1 { font-size: 1.45em; }
-.markdown h2 { font-size: 1.25em; }
-.markdown h3 { font-size: 1.1em; }
+.markdown h1 { font-size: 1.4em; }
+.markdown h2 { font-size: 1.22em; }
+.markdown h3 { font-size: 1.08em; }
 .markdown h4, .markdown h5, .markdown h6 { font-size: 1em; }
-.markdown ul, .markdown ol { margin: 4px 0 10px; padding-left: 24px; }
-.markdown blockquote { margin: 8px 0; padding: 5px 10px; border-left: 3px solid var(--primary); color: var(--muted-foreground); background: var(--muted); }
-.markdown code { padding: 2px 4px; border-radius: 4px; background: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9em; }
-.markdown pre { margin: 8px 0 12px; padding: 11px; overflow: auto; border: 1px solid var(--border); border-radius: 7px; background: var(--muted); }
+.markdown ul, .markdown ol { margin: 4px 0 10px; padding-left: 22px; }
+.markdown li + li { margin-top: 3px; }
+.markdown blockquote { margin: 8px 0 10px; padding: 6px 12px; border-left: 3px solid var(--primary); border-radius: 0 6px 6px 0; color: var(--muted-foreground); background: var(--secondary); }
+.markdown blockquote > :last-child { margin-bottom: 0; }
+.markdown code { padding: 2px 5px; border-radius: 5px; background: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .88em; }
+.markdown pre { margin: 8px 0 12px; padding: 11px 13px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--secondary); line-height: 1.55; }
 .markdown pre code { padding: 0; background: transparent; }
-.markdown a { color: var(--link); }
-.markdown table { display: block; max-width: 100%; margin: 8px 0 12px; overflow: auto; border-collapse: collapse; }
-.markdown th, .markdown td { padding: 5px 8px; border: 1px solid var(--border); text-align: left; }
-.markdown th { background: var(--muted); }
+.markdown a { color: var(--link); text-underline-offset: 2px; }
+.markdown table { display: block; max-width: 100%; margin: 8px 0 12px; overflow: auto; border-collapse: collapse; font-size: .95em; }
+.markdown th, .markdown td { padding: 6px 10px; border: 1px solid var(--border); text-align: left; }
+.markdown th { background: var(--secondary); font-weight: 600; }
 .markdown hr { margin: 16px 0; border: 0; border-top: 1px solid var(--border); }
-.markdown img { max-width: 100%; height: auto; }
+.markdown img { max-width: 100%; height: auto; border-radius: 6px; }

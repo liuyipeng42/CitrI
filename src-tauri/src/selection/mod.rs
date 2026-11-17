@@ -9,10 +9,10 @@ use capture::{CaptureGuard, capture_selection};
 use input::InputActivity;
 #[cfg(not(target_os = "windows"))]
 use rdev::listen;
-use rdev::{Button, Event, EventType, Key};
+use rdev::{Button, EventType, Key};
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -20,11 +20,11 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::Emitter;
-pub use toolbar::hide_toolbar;
 use toolbar::hide_toolbar_when_outside;
+pub use toolbar::{hide_toolbar, hide_toolbar_window};
 
 enum ListenerEvent {
-    Input(Event),
+    Input(EventType),
     #[cfg(target_os = "windows")]
     Reset,
 }
@@ -37,7 +37,7 @@ fn listen_events(sender: mpsc::Sender<ListenerEvent>) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
         listen(move |event| {
-            let _ = sender.send(ListenerEvent::Input(event));
+            let _ = sender.send(ListenerEvent::Input(event.event_type));
         })
         .map_err(|error| format!("{error:?}"))
     }
@@ -84,18 +84,24 @@ impl SelectionController {
         let (event_sender, event_receiver) = mpsc::channel();
         let worker_app = app.clone();
         thread::spawn(move || {
-            let gesture = Arc::new(Mutex::new(Gesture::default()));
+            let mut gesture = Gesture::default();
             for event in event_receiver {
                 match event {
                     ListenerEvent::Input(event) => {
-                        handle_event(&worker_app, &gesture, &enabled, &generation, &input, event);
+                        handle_event(
+                            &worker_app,
+                            &mut gesture,
+                            &enabled,
+                            &generation,
+                            &input,
+                            event,
+                        );
                     }
                     #[cfg(target_os = "windows")]
                     ListenerEvent::Reset => {
                         generation.fetch_add(1, Ordering::AcqRel);
                         input.note_pointer_activity();
-                        *gesture.lock().unwrap_or_else(|error| error.into_inner()) =
-                            Gesture::default();
+                        gesture = Gesture::default();
                     }
                 }
             }
@@ -130,28 +136,21 @@ impl SelectionController {
 
 fn handle_event(
     app: &tauri::AppHandle,
-    gesture: &Arc<Mutex<Gesture>>,
+    gesture: &mut Gesture,
     enabled: &Arc<AtomicBool>,
     generation: &Arc<AtomicU64>,
     input: &Arc<InputActivity>,
-    event: Event,
+    event_type: EventType,
 ) {
-    match event.event_type {
+    match event_type {
         EventType::MouseMove { x, y } => {
-            if let Ok(mut current) = gesture.lock() {
-                current.cursor = (x, y);
-            }
+            gesture.cursor = (x, y);
         }
         EventType::ButtonPress(Button::Left) => {
             generation.fetch_add(1, Ordering::AcqRel);
             input.note_pointer_activity();
-            let (x, y) = gesture
-                .lock()
-                .map(|mut current| {
-                    current.pressed = Some((current.cursor.0, current.cursor.1, Instant::now()));
-                    current.cursor
-                })
-                .unwrap_or_default();
+            let (x, y) = gesture.cursor;
+            gesture.pressed = Some((x, y, Instant::now()));
             hide_toolbar_when_outside(app, x, y);
         }
         EventType::ButtonRelease(Button::Left) => {
@@ -159,21 +158,19 @@ fn handle_event(
             if !enabled.load(Ordering::Acquire) {
                 return;
             }
-            let candidate = gesture.lock().ok().and_then(|mut current| {
-                let (x, y) = current.cursor;
-                let now = Instant::now();
-                let pressed = current.pressed.take();
-                let is_double_click = current.last_release.is_some_and(|(last_x, last_y, last)| {
-                    now.duration_since(last) <= Duration::from_millis(450)
-                        && (x - last_x).hypot(y - last_y) <= 5.0
-                });
-                current.last_release = Some((x, y, now));
-                pressed.and_then(|(start_x, start_y, started)| {
-                    let distance = (x - start_x).hypot(y - start_y);
-                    let duration = now.duration_since(started);
-                    (is_double_click || (distance >= 4.0 && duration <= Duration::from_secs(10)))
-                        .then_some((start_x, start_y, x, y))
-                })
+            let (x, y) = gesture.cursor;
+            let now = Instant::now();
+            let pressed = gesture.pressed.take();
+            let is_double_click = gesture.last_release.is_some_and(|(last_x, last_y, last)| {
+                now.duration_since(last) <= Duration::from_millis(450)
+                    && (x - last_x).hypot(y - last_y) <= 5.0
+            });
+            gesture.last_release = Some((x, y, now));
+            let candidate = pressed.and_then(|(start_x, start_y, started)| {
+                let distance = (x - start_x).hypot(y - start_y);
+                let duration = now.duration_since(started);
+                (is_double_click || (distance >= 4.0 && duration <= Duration::from_secs(10)))
+                    .then_some((start_x, start_y, x, y))
             });
             if let Some(points) = candidate {
                 let capture_id = generation.fetch_add(1, Ordering::AcqRel) + 1;

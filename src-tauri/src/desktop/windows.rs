@@ -90,11 +90,39 @@ pub fn create_action_window(
     // after set_focus can produce a late blur event and immediately auto-close
     // the newly created action window on Windows.
     if let Some(toolbar) = app.get_webview_window("toolbar") {
-        let _ = toolbar.hide();
+        crate::selection::hide_toolbar_window(&toolbar);
     }
     let _ = window.show();
     let _ = window.set_focus();
     Ok(window)
+}
+
+pub fn monitor_bounds(
+    window: &WebviewWindow,
+    anchor_x: i32,
+    anchor_y: i32,
+    size: tauri::PhysicalSize<u32>,
+    margin: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    let monitors = window.available_monitors().ok()?;
+    let monitor = monitors
+        .iter()
+        .find(|monitor| {
+            let position = monitor.position();
+            let monitor_size = monitor.size();
+            anchor_x >= position.x
+                && anchor_x < position.x + monitor_size.width as i32
+                && anchor_y >= position.y
+                && anchor_y < position.y + monitor_size.height as i32
+        })
+        .or_else(|| monitors.first())?;
+    let position = monitor.position();
+    let monitor_size = monitor.size();
+    let min_x = position.x + margin;
+    let min_y = position.y + margin;
+    let max_x = (position.x + monitor_size.width as i32 - size.width as i32 - margin).max(min_x);
+    let max_y = (position.y + monitor_size.height as i32 - size.height as i32 - margin).max(min_y);
+    Some((min_x, max_x, min_y, max_y))
 }
 
 fn position_below_toolbar(app: &tauri::AppHandle, action: &WebviewWindow) {
@@ -112,27 +140,27 @@ fn position_below_toolbar(app: &tauri::AppHandle, action: &WebviewWindow) {
     };
     let mut x = toolbar_position.x + (toolbar_size.width as i32 - action_size.width as i32) / 2;
     let mut y = toolbar_position.y + toolbar_size.height as i32 + 8;
-    if let Ok(monitors) = action.available_monitors()
-        && let Some(monitor) = monitors
-            .iter()
-            .find(|monitor| {
-                let position = monitor.position();
-                let size = monitor.size();
-                toolbar_position.x >= position.x
-                    && toolbar_position.x < position.x + size.width as i32
-                    && toolbar_position.y >= position.y
-                    && toolbar_position.y < position.y + size.height as i32
-            })
-            .or_else(|| monitors.first())
-    {
-        let position = monitor.position();
-        let size = monitor.size();
-        let min_x = position.x + 6;
-        let min_y = position.y + 6;
-        let max_x = (position.x + size.width as i32 - action_size.width as i32 - 6).max(min_x);
-        let max_y = (position.y + size.height as i32 - action_size.height as i32 - 6).max(min_y);
+    if let Some((min_x, max_x, min_y, max_y)) = monitor_bounds(
+        action,
+        toolbar_position.x,
+        toolbar_position.y,
+        action_size,
+        6,
+    ) {
         if y > max_y {
             y = toolbar_position.y - action_size.height as i32 - 8;
+        }
+        for (other_label, other) in app.webview_windows() {
+            if other_label.starts_with("action-")
+                && other_label != action.label()
+                && other.is_visible().unwrap_or(false)
+                && let Ok(pos) = other.outer_position()
+                && (pos.x - x).abs() < 24
+                && (pos.y - y).abs() < 24
+            {
+                x += 28;
+                y += 28;
+            }
         }
         x = x.clamp(min_x, max_x);
         y = y.clamp(min_y, max_y);

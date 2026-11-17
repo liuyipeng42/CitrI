@@ -140,6 +140,7 @@ pub async fn import_data(
     .await
     .map_err(|e| e.to_string())??;
     broadcast_restored(&app, &state, true);
+    state.sync.request_sync();
     Ok(Some(DataOperationResult {
         message: "已导入设置并合并历史记录，导入前数据已自动备份".into(),
         history_count: count,
@@ -162,9 +163,10 @@ pub async fn sync_webdav(
     window: WebviewWindow,
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    preferences: Option<SyncPreferences>,
 ) -> Result<DataOperationResult, String> {
     require_window(&window, "settings")?;
-    run_sync(&app, &state).await
+    run_sync(&app, &state, preferences).await
 }
 
 #[tauri::command]

@@ -5,7 +5,14 @@ use crate::{
     storage::write_atomic,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, sync::Mutex};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -24,6 +31,7 @@ pub struct SyncStore {
     path: PathBuf,
     value: Mutex<SyncConfig>,
     status: Mutex<SyncStatus>,
+    pending: AtomicBool,
     pub operation: tokio::sync::Mutex<()>,
     pub wake: tokio::sync::Notify,
 }
@@ -47,6 +55,7 @@ impl SyncStore {
             path,
             value: Mutex::new(value),
             status: Mutex::new(status),
+            pending: AtomicBool::new(true),
             operation: tokio::sync::Mutex::new(()),
             wake: tokio::sync::Notify::new(),
         }
@@ -87,10 +96,9 @@ impl SyncStore {
     }
 
     fn persist(&self, value: &SyncConfig) -> Result<(), String> {
-        write_atomic(
-            &self.path,
-            &serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?,
-        )
+        let mut contents = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+        contents.push(b'\n');
+        write_atomic(&self.path, &contents)
     }
 
     pub fn save_preferences(
@@ -99,7 +107,6 @@ impl SyncStore {
     ) -> Result<SyncPreferences, String> {
         preferences.url = preferences.url.trim().to_string();
         preferences.username = preferences.username.trim().to_string();
-        preferences.interval_minutes = preferences.interval_minutes.clamp(1, 1440);
         if preferences.url.len() > 2000
             || preferences.username.len() > 1000
             || preferences.password.len() > 8000
@@ -109,21 +116,24 @@ impl SyncStore {
         if !preferences.url.is_empty() {
             dav_directory_url(&preferences.url)?;
         }
-        if preferences.auto_sync && preferences.url.is_empty() {
-            return Err("请先填写 WebDAV 目录地址".into());
-        }
         let mut current = self.value.lock().map_err(|_| "同步配置存储已损坏")?;
         let mut next = current.clone();
+        let connection_changed = next.preferences.url != preferences.url
+            || next.preferences.username != preferences.username;
         // A different server is a new synchronization relationship.
-        if next.preferences.url != preferences.url
-            || next.preferences.username != preferences.username
-        {
+        if connection_changed {
             next.last_synced_at = 0;
             next.remote_etag.clear();
+            next.synced_settings_hash.clear();
+            next.synced_history_revision = 0;
         }
+        let changed = connection_changed || next.preferences != preferences;
         next.preferences = preferences.clone();
         self.persist(&next)?;
         *current = next;
+        if changed && !preferences.url.is_empty() {
+            self.pending.store(true, Ordering::Release);
+        }
         self.wake.notify_one();
         Ok(preferences)
     }
@@ -140,6 +150,8 @@ impl SyncStore {
             now_millis().max(current.settings_modified_at.saturating_add(1));
         self.persist(&next)?;
         *current = next;
+        drop(current);
+        self.request_sync();
         Ok(())
     }
 
@@ -187,6 +199,19 @@ impl SyncStore {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .last_synced_at = now_millis();
+    }
+
+    pub fn request_sync(&self) {
+        self.pending.store(true, Ordering::Release);
+        self.wake.notify_one();
+    }
+
+    pub fn has_pending(&self) -> bool {
+        self.pending.load(Ordering::Acquire)
+    }
+
+    pub fn take_pending(&self) -> bool {
+        self.pending.swap(false, Ordering::AcqRel)
     }
 
     pub fn set_status(&self, busy: bool, message: String, error: String) -> SyncStatus {

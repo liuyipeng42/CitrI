@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use std::{sync::mpsc, thread, time::Duration};
+use std::time::Duration;
 use tauri::Manager;
 
 fn cursor_is_near_window(window: &tauri::Window) -> bool {
@@ -19,13 +19,13 @@ fn cursor_is_near_window(window: &tauri::Window) -> bool {
 }
 
 fn schedule_action_auto_close(app: tauri::AppHandle, label: String) {
-    thread::spawn(move || {
+    tauri::async_runtime::spawn(async move {
         loop {
-            thread::sleep(Duration::from_millis(250));
+            tokio::time::sleep(Duration::from_millis(250)).await;
             let dispatcher = app.clone();
             let check_app = app.clone();
             let check_label = label.clone();
-            let (sender, receiver) = mpsc::sync_channel(1);
+            let (sender, receiver) = tokio::sync::oneshot::channel();
             if dispatcher
                 .run_on_main_thread(move || {
                     let Some(webview_window) = check_app.get_webview_window(&check_label) else {
@@ -60,7 +60,7 @@ fn schedule_action_auto_close(app: tauri::AppHandle, label: String) {
                     let _ = sender.send(retry);
                 })
                 .is_err()
-                || !receiver.recv().unwrap_or(false)
+                || !receiver.await.unwrap_or(false)
             {
                 break;
             }

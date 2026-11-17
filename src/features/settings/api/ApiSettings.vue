@@ -96,10 +96,6 @@ function deleteProfile(): void {
   emit('status', '已删除')
 }
 
-function changeParameterType(parameter: ExtraParameter): void {
-  normalizeExtraParameterValue(parameter)
-}
-
 function addParameter(): void {
   extraParameters.value.push({ key: '', type: 'boolean', value: 'false' })
   emit('draft-change')
@@ -138,7 +134,7 @@ defineExpose({ commit, reload })
             <div v-if="!extraParameters.length" class="parameter-empty">暂无额外参数</div>
             <div v-for="(parameter, index) in extraParameters" :key="index" class="parameter-row">
               <input v-model="parameter.key" placeholder="参数名称" spellcheck="false" />
-              <select v-model="parameter.type" @change="changeParameterType(parameter)"><option value="string">字符串</option><option value="boolean">布尔值</option><option value="number">数字</option><option value="json">JSON</option></select>
+              <select v-model="parameter.type" @change="normalizeExtraParameterValue(parameter)"><option value="string">字符串</option><option value="boolean">布尔值</option><option value="number">数字</option><option value="json">JSON</option></select>
               <select v-if="parameter.type === 'boolean'" v-model="parameter.value"><option value="true">true</option><option value="false">false</option></select>
               <input v-else v-model="parameter.value" :placeholder="parameter.type === 'json' ? '{&quot;key&quot;:&quot;value&quot;}' : '参数值'" spellcheck="false" />
               <button type="button" title="删除参数" @click="extraParameters.splice(index, 1)"><AppIcon name="trash" :size="14" /></button>

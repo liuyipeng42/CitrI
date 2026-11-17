@@ -4,11 +4,13 @@ use super::{
     },
     webdav::{DavClient, RemoteRead, UploadResult},
 };
-use crate::{data, history::merge_history, models::DataOperationResult, state::AppState};
-use std::{
-    sync::atomic::Ordering,
-    time::{Duration, Instant},
+use crate::{
+    data,
+    history::merge_history,
+    models::{DataOperationResult, SyncPreferences},
+    state::AppState,
 };
+use std::{sync::atomic::Ordering, time::Duration};
 use tauri::{Emitter, Manager};
 
 pub(super) fn emit_status(
@@ -130,6 +132,9 @@ async fn synchronize(
         .await
         .map_err(|e| e.to_string())??;
         broadcast_restored(app, state, settings_changed);
+        if pending {
+            state.sync.request_sync();
+        }
         return Ok(DataOperationResult {
             message: if pending {
                 "同步完成；同步期间的新内容将在下次同步上传".into()
@@ -146,12 +151,17 @@ async fn synchronize(
 pub(super) async fn run_sync(
     app: &tauri::AppHandle,
     state: &AppState,
+    preferences: Option<SyncPreferences>,
 ) -> Result<DataOperationResult, String> {
     let _operation = state
         .sync
         .operation
         .try_lock()
         .map_err(|_| "正在执行其他数据操作，请稍后重试")?;
+    if let Some(preferences) = preferences {
+        state.sync.save_preferences(preferences)?;
+    }
+    state.sync.take_pending();
     emit_status(app, state, true, "正在同步…".into(), String::new());
     let result = synchronize(app, state).await;
     match &result {
@@ -162,39 +172,40 @@ pub(super) async fn run_sync(
     result
 }
 
+const AUTO_SYNC_DEBOUNCE: Duration = Duration::from_millis(800);
+
 pub fn start_auto_sync(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut last_attempt: Option<Instant> = None;
-        let mut previous = None;
         loop {
             let state = app.state::<AppState>();
             if state.is_quitting() {
                 break;
             }
             let preferences = state.sync.preferences();
-            if previous.as_ref() != Some(&preferences) {
-                last_attempt = None;
-                previous = Some(preferences.clone());
-            }
-            if !preferences.auto_sync || preferences.url.is_empty() {
+            if preferences.url.is_empty()
+                || state.sync_editing.load(Ordering::Acquire)
+                || state.sync.status().busy
+                || !state.sync.has_pending()
+            {
                 state.sync.wake.notified().await;
                 continue;
             }
-            let interval =
-                Duration::from_secs(preferences.interval_minutes.clamp(1, 1440) as u64 * 60);
-            let wait = last_attempt.map_or(Duration::ZERO, |attempt| {
-                interval.saturating_sub(attempt.elapsed())
-            });
-            if !wait.is_zero() {
-                tokio::select! {_=tokio::time::sleep(wait)=>{},_=state.sync.wake.notified()=>{}}
+            tokio::select! {
+                _ = tokio::time::sleep(AUTO_SYNC_DEBOUNCE) => {}
+                _ = state.sync.wake.notified() => continue,
+            }
+            if state.is_quitting() {
+                break;
+            }
+            let preferences = state.sync.preferences();
+            if preferences.url.is_empty()
+                || state.sync_editing.load(Ordering::Acquire)
+                || state.sync.status().busy
+                || !state.sync.take_pending()
+            {
                 continue;
             }
-            if state.sync_editing.load(Ordering::Acquire) || state.sync.status().busy {
-                state.sync.wake.notified().await;
-                continue;
-            }
-            last_attempt = Some(Instant::now());
-            let _ = run_sync(&app, &state).await;
+            let _ = run_sync(&app, &state, None).await;
         }
     });
 }

@@ -10,6 +10,25 @@ pub enum HistoryStatus {
     Cancelled,
 }
 
+impl HistoryStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "success" => Some(Self::Success),
+            "error" => Some(Self::Error),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

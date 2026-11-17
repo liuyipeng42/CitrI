@@ -1,6 +1,7 @@
 use super::actions::{ActionItem, default_actions};
 use crate::constants::{
-    ACTION_WINDOW_DEFAULT_HEIGHT, ACTION_WINDOW_DEFAULT_WIDTH, clamp_action_window_size,
+    ACTION_WINDOW_DEFAULT_HEIGHT, ACTION_WINDOW_DEFAULT_WIDTH, MAX_HISTORY_LIMIT,
+    clamp_action_window_size,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -125,14 +126,7 @@ impl Settings {
         self.api_profiles.truncate(20);
         for (index, profile) in self.api_profiles.iter_mut().enumerate() {
             let base = non_empty(limited(profile.id.trim(), 68), format!("api-{}", index + 1));
-            let mut id = base.clone();
-            let mut suffix = 2;
-            while used_ids.contains(&id) {
-                id = format!("{base}-{suffix}");
-                suffix += 1;
-            }
-            used_ids.insert(id.clone());
-            profile.id = id;
+            profile.id = unique_id(&mut used_ids, base);
             profile.name = non_empty(
                 limited(profile.name.trim(), 50),
                 format!("API {}", index + 1),
@@ -166,25 +160,26 @@ impl Settings {
         (self.action_window_width, self.action_window_height) =
             clamp_action_window_size(self.action_window_width, self.action_window_height);
         self.font_size = self.font_size.clamp(85, 125);
-        self.history_limit = self.history_limit.min(1000);
+        self.history_limit = self.history_limit.min(MAX_HISTORY_LIMIT);
         self.custom_accent_color =
             sanitize_hex(&self.custom_accent_color, &defaults.custom_accent_color);
         self.search_url = non_empty(limited(self.search_url.trim(), 2000), defaults.search_url);
+        let mut seen_filters = HashSet::new();
         self.filter_list = self
             .filter_list
             .into_iter()
             .map(|item| limited(item.trim().to_lowercase(), 260))
-            .filter(|item| !item.is_empty())
+            .filter(|item| !item.is_empty() && seen_filters.insert(item.clone()))
             .take(200)
             .collect();
 
+        let mut used_action_ids = HashSet::new();
         self.actions.truncate(20);
         for (index, action) in self.actions.iter_mut().enumerate() {
-            let fallback = defaults.actions.iter().find(|item| item.id == action.id);
-            action.id = non_empty(
-                limited(action.id.trim(), 80),
-                format!("custom-{}", index + 1),
-            );
+            let trimmed_id = action.id.trim();
+            let fallback = defaults.actions.iter().find(|item| item.id == trimmed_id);
+            let base = non_empty(limited(trimmed_id, 80), format!("custom-{}", index + 1));
+            action.id = unique_id(&mut used_action_ids, base);
             action.name = non_empty(
                 limited(action.name.trim(), 40),
                 fallback
@@ -199,7 +194,7 @@ impl Settings {
             );
             action.built_in = fallback
                 .as_ref()
-                .map_or(action.built_in, |item| item.built_in);
+                .is_some_and(|item| item.built_in && item.id == action.id);
             action.prompt = limited(&action.prompt, 20_000);
             if action.prompt.is_empty()
                 && let Some(fallback) = fallback
@@ -274,6 +269,15 @@ fn limited(value: impl AsRef<str>, max: usize) -> String {
 }
 fn non_empty(value: String, fallback: String) -> String {
     if value.is_empty() { fallback } else { value }
+}
+fn unique_id(used: &mut HashSet<String>, base: String) -> String {
+    let mut id = base.clone();
+    let mut suffix = 2;
+    while !used.insert(id.clone()) {
+        id = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    id
 }
 fn finite_clamp(value: f64, fallback: f64, min: f64, max: f64) -> f64 {
     if value.is_finite() {

@@ -187,15 +187,19 @@ fn sync_configuration_is_local_and_window_sizes_do_not_change_shared_settings() 
     let preferences = SyncPreferences {
         url: "https://dav.example.com/CitrI".into(),
         password: "dav-password".into(),
-        auto_sync: true,
         ..SyncPreferences::default()
     };
     store.save_preferences(preferences.clone()).unwrap();
+    assert!(store.take_pending());
     store.mark_applied(&settings, 100, true).unwrap();
     assert!(!store.first_sync());
     settings.action_window_width = 900;
     store.note_settings(&settings).unwrap();
+    assert!(!store.has_pending());
     assert_eq!(store.modified_at(), 100);
+    settings.compact = true;
+    store.note_settings(&settings).unwrap();
+    assert!(store.take_pending());
     assert_eq!(
         SyncStore::load(path, &settings, 100).preferences(),
         preferences

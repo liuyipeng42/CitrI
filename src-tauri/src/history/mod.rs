@@ -1,6 +1,6 @@
 mod store;
 
-use crate::models::HistoryEntry;
+use crate::{constants::clamp_history_limit, models::HistoryEntry};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -48,7 +48,7 @@ pub fn merge_history(
             .cmp(&a.created_at)
             .then_with(|| b.sync_id.cmp(&a.sync_id))
     });
-    entries.truncate(limit.min(1000) as usize);
+    entries.truncate(clamp_history_limit(limit));
     HistorySnapshot {
         entries: entries.into_iter().cloned().collect(),
         cleared_at,

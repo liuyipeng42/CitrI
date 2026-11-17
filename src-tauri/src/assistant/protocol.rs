@@ -1,10 +1,21 @@
 use serde_json::Value;
 
-pub(super) fn extract_text(payload: &Value) -> String {
-    let Some(content) = payload
-        .pointer("/choices/0/delta/content")
-        .or_else(|| payload.pointer("/choices/0/message/content"))
-    else {
+/// Error marker for requests stopped by the user, replaced or closed windows.
+pub const CANCELLED: &str = "__CANCELLED__";
+
+/// Streaming chunks use `delta`, non-streaming responses use `message`.
+fn choice_field<'a>(choice: Option<&'a Value>, field: &str) -> Option<&'a Value> {
+    let choice = choice?;
+    ["delta", "message"].into_iter().find_map(|kind| {
+        choice
+            .get(kind)?
+            .get(field)
+            .filter(|value| !value.is_null())
+    })
+}
+
+fn extract_text(choice: Option<&Value>) -> String {
+    let Some(content) = choice_field(choice, "content") else {
         return String::new();
     };
     if let Some(text) = content.as_str() {
@@ -16,11 +27,8 @@ pub(super) fn extract_text(payload: &Value) -> String {
             parts
                 .iter()
                 .filter_map(|part| {
-                    part.as_str().map(ToOwned::to_owned).or_else(|| {
-                        part.get("text")
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned)
-                    })
+                    part.as_str()
+                        .or_else(|| part.get("text").and_then(Value::as_str))
                 })
                 .collect()
         })
@@ -62,25 +70,21 @@ pub struct ChatCompletion {
 }
 
 pub(super) fn extract_delta(payload: &Value) -> ChatDelta {
-    let reasoning = ["delta", "message"]
+    let choice = payload.pointer("/choices/0");
+    let reasoning = ["reasoning_content", "reasoning"]
         .into_iter()
-        .find_map(|kind| {
-            ["reasoning_content", "reasoning"]
-                .into_iter()
-                .find_map(|field| {
-                    payload
-                        .pointer(&format!("/choices/0/{kind}/{field}"))
-                        .and_then(Value::as_str)
-                        .filter(|text| !text.is_empty())
-                })
+        .find_map(|field| {
+            choice_field(choice, field)
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
         })
         .unwrap_or_default()
         .to_owned();
     ChatDelta {
-        content: extract_text(payload),
+        content: extract_text(choice),
         reasoning,
-        finish_reason: payload
-            .pointer("/choices/0/finish_reason")
+        finish_reason: choice
+            .and_then(|choice| choice.get("finish_reason"))
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
     }
@@ -137,26 +141,23 @@ pub(super) fn append_delta(
     }
 }
 
+/// Removes the first complete SSE event (terminated by `\n\n` or `\r\n\r\n`).
 pub(super) fn next_sse_block(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let lf = buffer
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|index| (index, 2));
-    let crlf = buffer
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| (index, 4));
-    let (index, separator) = match (lf, crlf) {
-        (Some(left), Some(right)) => {
-            if left.0 <= right.0 {
-                left
+    // Both separators end with `\n`; a single scan finds whichever comes first.
+    let (index, separator) = buffer
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, byte)| **byte == b'\n')
+        .find_map(|(end, _)| {
+            if buffer[end - 1] == b'\n' {
+                Some((end - 1, 2))
+            } else if end >= 3 && &buffer[end - 3..end] == b"\r\n\r" {
+                Some((end - 3, 4))
             } else {
-                right
+                None
             }
-        }
-        (Some(value), None) | (None, Some(value)) => value,
-        (None, None) => return None,
-    };
+        })?;
     let block = buffer[..index].to_vec();
     buffer.drain(..index + separator);
     Some(block)

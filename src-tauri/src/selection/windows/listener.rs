@@ -2,14 +2,14 @@
 //! the application. Hook callbacks only copy input into the worker's queue;
 //! keyboard layout/name resolution and UI Automation never run on this thread.
 use crate::selection::{ListenerEvent, input::windows_keyboard_idle};
-use rdev::{Button, Event, EventType, Key};
+use rdev::{Button, EventType, Key};
 use std::{
     cell::RefCell,
     io,
     mem::{size_of, zeroed},
     ptr::null_mut,
     sync::mpsc::Sender,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 use winapi::{
     shared::{
@@ -39,11 +39,7 @@ fn send(event_type: EventType) {
         if let Some(context) = context.borrow_mut().as_mut() {
             context.events = context.events.wrapping_add(1);
             context.last_event = Instant::now();
-            let _ = context.sender.send(ListenerEvent::Input(Event {
-                event_type,
-                time: SystemTime::now(),
-                name: None,
-            }));
+            let _ = context.sender.send(ListenerEvent::Input(event_type));
         }
     });
 }

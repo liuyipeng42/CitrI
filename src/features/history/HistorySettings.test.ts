@@ -126,32 +126,44 @@ describe('历史记录设置与交互', () => {
     expect(bridge.command.mock.calls.filter(([name]) => name === 'save_settings')).toHaveLength(0)
   })
 
-  it('searches originals, prompts, results and metadata without changing saved settings', async () => {
+  it('searches originals, prompts, results and metadata and opens detail modal on click without changing saved settings', async () => {
     records.push({ ...records[0]!, id: 2, actionName: '总结', model: 'summary-model', selectedText: '另一段原文', prompt: '请求关键词', systemPrompt: '系统关键词', result: '回答关键词', error: '错误关键词' })
     await openHistory()
+    expect(root.querySelector('.history-detail')).toBeNull()
     await search('  HELLO  ')
     expect(root.querySelectorAll('.history-list button')).toHaveLength(1)
-    expect(root.querySelector('.history-detail')?.textContent).toContain('hello')
     expect(root.querySelector('.history-count')?.textContent).toBe('1 / 2 条')
+    root.querySelector<HTMLButtonElement>('.history-list button')!.click()
+    await flush()
+    expect(root.querySelector('.history-detail')?.textContent).toContain('hello')
+    root.querySelector<HTMLButtonElement>('.history-modal-close')!.click()
+    await flush()
+    expect(root.querySelector('.history-detail')).toBeNull()
     for (const query of ['请求关键词', '系统关键词', '回答关键词', '错误关键词', '总结', 'SUMMARY-MODEL', '另一段 回答关键词']) {
       await search(query)
       expect(root.querySelectorAll('.history-list button')).toHaveLength(1)
-      expect(root.querySelector('.history-list button.active')?.getAttribute('aria-current')).toBe('true')
-      expect(root.querySelector('.history-detail')?.textContent).toContain('另一段原文')
     }
+    root.querySelector<HTMLButtonElement>('.history-list button')!.click()
+    await flush()
+    expect(root.querySelector('.history-list button.active')?.getAttribute('aria-current')).toBe('true')
+    expect(root.querySelector('.history-detail')?.textContent).toContain('另一段原文')
     expect(bridge.command.mock.calls.filter(([name]) => name === 'save_settings')).toHaveLength(0)
     expect(bridge.command.mock.calls.filter(([name]) => name === 'get_history_entry')).toHaveLength(2)
   })
 
-  it('loads summaries in pages and reads only the selected detail', async () => {
+  it('loads summaries in pages and reads detail only when an item is clicked', async () => {
     const prototype = records[0]!
     records = Array.from({ length: 95 }, (_, index) => ({ ...prototype, id: 95 - index, syncId: `record-${index}`, result: 'x'.repeat(50_000) }))
     await openHistory()
     expect(root.querySelectorAll('.history-item-heading')).toHaveLength(50)
-    expect(bridge.command.mock.calls.filter(([name]) => name === 'get_history_entry')).toHaveLength(1)
+    expect(bridge.command.mock.calls.filter(([name]) => name === 'get_history_entry')).toHaveLength(0)
     button('加载更多').click(); await flush()
     expect(root.querySelectorAll('.history-item-heading')).toHaveLength(95)
     expect(bridge.command).toHaveBeenCalledWith('list_history', { query: '', offset: 50, limit: 50 })
     expect(root.querySelector('.history-count')?.textContent).toBe('95 条')
+    root.querySelector<HTMLButtonElement>('.history-list button')!.click()
+    await flush()
+    expect(bridge.command.mock.calls.filter(([name]) => name === 'get_history_entry')).toHaveLength(1)
+    expect(root.querySelector('.history-detail')).not.toBeNull()
   })
 })

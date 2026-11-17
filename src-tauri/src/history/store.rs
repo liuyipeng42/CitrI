@@ -1,6 +1,7 @@
 use crate::{
+    constants::clamp_history_limit,
     history::{HistorySnapshot, now_millis},
-    models::{HistoryEntry, HistoryPage, HistorySummary},
+    models::{HistoryEntry, HistoryPage, HistoryStatus, HistorySummary},
 };
 use rusqlite::{
     Connection, OptionalExtension, Transaction, params, params_from_iter, types::Value,
@@ -68,6 +69,14 @@ fn database(path: &Path) -> Result<Connection, String> {
     Ok(connection)
 }
 
+fn count_rows(connection: &Connection) -> Result<usize, String> {
+    connection
+        .query_row("SELECT count(*) FROM history", [], |row| {
+            row.get::<_, i64>(0).map(|count| count as usize)
+        })
+        .map_err(|e| e.to_string())
+}
+
 fn meta(connection: &Connection, key: &str) -> Result<u64, String> {
     connection
         .query_row("SELECT value FROM metadata WHERE key=?1", [key], |row| {
@@ -89,7 +98,6 @@ fn set_meta(transaction: &Transaction<'_>, key: &str, value: u64) -> Result<(), 
 fn put(transaction: &Transaction<'_>, entry: &HistoryEntry) -> Result<usize, String> {
     let payload = serde_json::to_string(entry).map_err(|e| e.to_string())?;
     let preview: String = entry.selected_text.chars().take(160).collect();
-    let status = serde_json::to_value(entry.status).map_err(|e| e.to_string())?;
     let search = [
         entry.action_name.as_str(),
         entry.model.as_str(),
@@ -101,11 +109,25 @@ fn put(transaction: &Transaction<'_>, entry: &HistoryEntry) -> Result<usize, Str
     ]
     .join("\n")
     .to_lowercase();
-    transaction.execute("INSERT INTO history(id,sync_id,created_at,action_name,preview,status,payload,search_text)
+    let mut statement = transaction
+        .prepare_cached(
+            "INSERT INTO history(id,sync_id,created_at,action_name,preview,status,payload,search_text)
         VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(sync_id) DO UPDATE SET
         id=excluded.id,created_at=excluded.created_at,action_name=excluded.action_name,preview=excluded.preview,status=excluded.status,
         payload=excluded.payload,search_text=excluded.search_text WHERE history.payload!=excluded.payload",
-        params![i64::try_from(entry.id).map_err(|e|e.to_string())?,entry.sync_id,i64::try_from(entry.created_at).map_err(|e|e.to_string())?,entry.action_name,preview,status.as_str().unwrap_or("success"),payload,search])
+        )
+        .map_err(|e| format!("无法保存历史记录：{e}"))?;
+    statement
+        .execute(params![
+            i64::try_from(entry.id).map_err(|e| e.to_string())?,
+            entry.sync_id,
+            i64::try_from(entry.created_at).map_err(|e| e.to_string())?,
+            entry.action_name,
+            preview,
+            entry.status.as_str(),
+            payload,
+            search
+        ])
         .map_err(|e| format!("无法保存历史记录：{e}"))
 }
 
@@ -138,23 +160,25 @@ impl State {
 
 impl HistoryStore {
     pub fn load(path: PathBuf, limit: u32) -> Result<Self, String> {
+        let limit = clamp_history_limit(limit);
         let initialized = (|| {
             let mut connection = database(&path)?;
-            let next_id = meta(&connection, "next_id")?;
-            let count: usize = connection
-                .query_row("SELECT count(*) FROM history", [], |row| {
-                    row.get::<_, i64>(0).map(|count| count as usize)
+            let max_id: u64 = connection
+                .query_row("SELECT coalesce(max(id), 0) FROM history", [], |row| {
+                    row.get::<_, i64>(0).map(|id| id as u64)
                 })
                 .map_err(|e| e.to_string())?;
-            if count > limit.min(1000) as usize {
+            let next_id = meta(&connection, "next_id")?.max(max_id + 1);
+            let count = count_rows(&connection)?;
+            if count > limit {
                 let transaction = connection.transaction().map_err(|e| e.to_string())?;
-                prune(&transaction, limit.min(1000) as usize)?;
+                prune(&transaction, limit)?;
                 commit(transaction, true, next_id)?;
             }
             let revision = meta(&connection, "revision")?;
             Ok::<_, String>(State {
                 connection: Some(connection),
-                limit: limit.min(1000) as usize,
+                limit,
                 next_id,
                 generation: 0,
                 revision,
@@ -165,7 +189,7 @@ impl HistoryStore {
             Ok(value) => value,
             Err(error) => State {
                 connection: None,
-                limit: limit.min(1000) as usize,
+                limit,
                 next_id: 1,
                 generation: 0,
                 revision: 0,
@@ -213,12 +237,7 @@ impl HistoryStore {
 
     pub fn count(&self) -> Result<usize, String> {
         let state = self.value.lock().map_err(|_| "历史数据库已损坏")?;
-        state
-            .connection()?
-            .query_row("SELECT count(*) FROM history", [], |row| {
-                row.get::<_, i64>(0).map(|count| count as usize)
-            })
-            .map_err(|e| e.to_string())
+        count_rows(state.connection()?)
     }
 
     pub fn revision(&self) -> u64 {
@@ -270,11 +289,7 @@ impl HistoryStore {
             .progress_handler(100, Some(move || latest.load(Ordering::Acquire) != ticket))
             .map_err(|e| e.to_string())?;
         let _progress = QueryProgress(connection);
-        let total = connection
-            .query_row("SELECT count(*) FROM history", [], |row| {
-                row.get::<_, i64>(0).map(|count| count as usize)
-            })
-            .map_err(|e| e.to_string())?;
+        let total = count_rows(connection)?;
         let terms: Vec<_> = query
             .trim()
             .to_lowercase()
@@ -317,18 +332,21 @@ impl HistoryStore {
         };
         values.push((limit.clamp(1, 200) as i64).into());
         values.push((offset.min(1000) as i64).into());
-        let mut statement=connection.prepare_cached(&format!("SELECT id,created_at,action_name,preview,status FROM history{filter} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?")).map_err(|e|e.to_string())?;
+        let mut statement = connection
+            .prepare_cached(&format!(
+                "SELECT id,created_at,action_name,preview,status FROM history{filter} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
+            ))
+            .map_err(|e| e.to_string())?;
         let entries = statement
             .query_map(params_from_iter(values.iter()), |row| {
-                let status: String = row.get(4)?;
-                let status =
-                    serde_json::from_value(serde_json::Value::String(status)).map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            4,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    })?;
+                let raw_status = row.get_ref(4)?.as_str()?;
+                let status = HistoryStatus::from_db(raw_status).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        format!("未知的历史状态：{raw_status}").into(),
+                    )
+                })?;
                 Ok(HistorySummary {
                     id: row.get::<_, i64>(0)? as u64,
                     created_at: row.get::<_, i64>(1)? as u64,
@@ -397,10 +415,11 @@ impl HistoryStore {
                 id
             });
         }
+        let limit = clamp_history_limit(limit);
         snapshot
             .entries
             .sort_by_key(|entry| std::cmp::Reverse((entry.created_at, entry.id)));
-        snapshot.entries.truncate(limit.min(1000) as usize);
+        snapshot.entries.truncate(limit);
         let transaction = connection.transaction().map_err(|e| e.to_string())?;
         let ids: Vec<_> = snapshot
             .entries
@@ -424,7 +443,7 @@ impl HistoryStore {
             state.generation += 1;
         }
         state.next_id = next_id;
-        state.limit = limit.min(1000) as usize;
+        state.limit = limit;
         state.load_error = None;
         if changed {
             state.revision += 1;
@@ -433,7 +452,7 @@ impl HistoryStore {
     }
 
     pub fn set_limit(&self, limit: u32) -> Result<(), String> {
-        let limit = limit.min(1000) as usize;
+        let limit = clamp_history_limit(limit);
         let mut state = self.value.lock().map_err(|_| "历史数据库已损坏")?;
         if state.limit == limit {
             return Ok(());
@@ -442,13 +461,15 @@ impl HistoryStore {
             drop(state);
             self.clear()?;
             state = self.value.lock().map_err(|_| "历史数据库已损坏")?;
-        } else if let Some(connection) = state.connection.as_mut() {
-            let next_id = meta(connection, "next_id")?;
-            let transaction = connection.transaction().map_err(|e| e.to_string())?;
-            let changed = prune(&transaction, limit)? > 0;
-            commit(transaction, changed, next_id)?;
-            if changed {
-                state.revision += 1;
+        } else {
+            let next_id = state.next_id;
+            if let Some(connection) = state.connection.as_mut() {
+                let transaction = connection.transaction().map_err(|e| e.to_string())?;
+                let changed = prune(&transaction, limit)? > 0;
+                commit(transaction, changed, next_id)?;
+                if changed {
+                    state.revision += 1;
+                }
             }
         }
         state.limit = limit;
